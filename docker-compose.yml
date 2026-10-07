@@ -1,0 +1,10 @@
+services:
+  mcp-agent:
+    build: .
+    ports:
+      - "8787:8787"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}

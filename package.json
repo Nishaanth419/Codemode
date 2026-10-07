@@ -1,0 +1,24 @@
+{
+  "name": "code-mode-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Code Mode agent — converts MCP tools into a typed TypeScript API, has the LLM write code, and executes it in a sandboxed Dynamic Worker",
+  "scripts": {
+    "dev": "wrangler dev --ip 0.0.0.0 --port 8787",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test:tools": "curl -s http://localhost:8787/api/tools | jq ."
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^4.0.80",
+    "@cloudflare/codemode": "^0.5.2",
+    "@cloudflare/workers-types": "^5.20260925.1",
+    "agents": "^0.24.0",
+    "ai": "^7.0.114",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "wrangler": "^4.140.0"
+  }
+}
