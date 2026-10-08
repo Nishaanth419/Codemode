@@ -131,6 +131,23 @@
       overflow: hidden;
     }
 
+    #login-screen {
+      flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px;
+    }
+    .login-card {
+      width: min(440px, 100%); padding: 32px; text-align: center;
+      background: var(--bg-surface); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); box-shadow: 0 20px 80px rgba(0,0,0,0.28);
+    }
+    .login-title { margin: 12px 0 8px; font-size: 22px; font-weight: 650; }
+    .login-copy { margin-bottom: 22px; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+    #login-cta {
+      border: 0; border-radius: var(--radius-sm); padding: 11px 18px; color: white;
+      background: linear-gradient(135deg, var(--accent), #4f46e5);
+      font: 600 13px var(--font-sans); cursor: pointer;
+    }
+    #clear-history-button { margin-left: 0; }
+
     /* ── Sidebar ─────────────────────────────────────────────────── */
     #sidebar {
       width: var(--sidebar-w);
@@ -695,6 +712,7 @@
       <div class="logo-sub">Direct INDmoney MCP tools</div>
   </div>
   <div class="topbar-spacer"></div>
+  <button id="clear-history-button" class="auth-button" type="button" style="display:none">Clear chat</button>
   <button id="auth-button" class="auth-button" type="button">Connect INDmoney</button>
   <div id="status-badge">
     <div class="status-dot" id="status-dot"></div>
@@ -702,8 +720,17 @@
   </div>
 </header>
 
+<section id="login-screen" aria-labelledby="login-title">
+  <div class="login-card">
+    <div class="logo-mark" style="margin:0 auto">⌘</div>
+    <h1 class="login-title" id="login-title">Sign in to your portfolio assistant</h1>
+    <p class="login-copy">Sign in securely with INDmoney. Your portfolio tools and saved chat history are available only to this signed-in account.</p>
+    <button id="login-cta" type="button">Sign in with INDmoney</button>
+  </div>
+</section>
+
 <!-- Main -->
-<div id="main">
+<div id="main" style="display:none">
 
   <!-- Sidebar: Tools -->
   <aside id="sidebar">
@@ -748,7 +775,7 @@
     <!-- Input -->
     <div id="input-area">
       <div id="input-wrap">
-        <textarea id="user-input" rows="1" placeholder="Ask the agent anything… it will write and run code to answer you." aria-label="Message input"></textarea>
+        <textarea id="user-input" rows="1" placeholder="Ask a question about your portfolio…" aria-label="Message input"></textarea>
         <button id="send-btn" title="Send message (Enter)" aria-label="Send">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <line x1="22" y1="2" x2="11" y2="13"></line>
@@ -792,6 +819,10 @@ const userInput  = document.getElementById('user-input');
 const sendBtn    = document.getElementById('send-btn');
 const toolDetail = document.getElementById('tool-detail');
 const authButton = document.getElementById('auth-button');
+const clearHistoryButton = document.getElementById('clear-history-button');
+const loginScreen = document.getElementById('login-screen');
+const loginCta = document.getElementById('login-cta');
+const mainLayout = document.getElementById('main');
 let isConnected = false;
 
 /* ── Status helpers ─────────────────────────────────────────────────── */
@@ -811,6 +842,10 @@ async function loadTools() {
     isConnected = data.connected === true;
     authButton.textContent = isConnected ? 'Disconnect' : 'Connect INDmoney';
     authButton.title = isConnected ? 'Disconnect your INDmoney account' : 'Sign in securely with INDmoney';
+    authButton.style.display = isConnected ? '' : 'none';
+    clearHistoryButton.style.display = isConnected ? '' : 'none';
+    loginScreen.style.display = isConnected ? 'none' : 'flex';
+    mainLayout.style.display = isConnected ? 'flex' : 'none';
     toolCount.textContent = tools.length;
     toolCount.style.display = '';
 
@@ -821,6 +856,7 @@ async function loadTools() {
 
     if (isConnected) {
       renderTools();
+      await loadChatHistory();
       setStatus('online', `${tools.length} tools loaded`);
     } else {
       toolsList.innerHTML = '<div class="tools-loading">Connect your INDmoney account to load your tools.</div>';
@@ -832,6 +868,8 @@ async function loadTools() {
   }
 }
 
+loginCta.addEventListener('click', () => window.location.assign('/auth/indmoney/connect'));
+
 authButton.addEventListener('click', async () => {
   if (!isConnected) {
     window.location.assign('/auth/indmoney/connect');
@@ -840,9 +878,28 @@ authButton.addEventListener('click', async () => {
   authButton.disabled = true;
   try {
     await fetch('/auth/indmoney/disconnect', { method: 'POST' });
+    messages.innerHTML = '';
+    messages.classList.remove('has-messages');
+    emptyState.style.display = '';
     await loadTools();
   } finally {
     authButton.disabled = false;
+  }
+});
+
+clearHistoryButton.addEventListener('click', async () => {
+  if (!window.confirm('Delete your saved chat history?')) return;
+  clearHistoryButton.disabled = true;
+  try {
+    const response = await fetch('/api/chat/history', { method: 'DELETE' });
+    if (!response.ok) throw new Error(`Could not clear chat history (HTTP ${response.status}).`);
+    messages.innerHTML = '';
+    messages.classList.remove('has-messages');
+    emptyState.style.display = '';
+  } catch (error) {
+    addMessage('assistant', `<span style="color:var(--error)">${escHtml(error.message)}</span>`);
+  } finally {
+    clearHistoryButton.disabled = false;
   }
 });
 
@@ -931,6 +988,23 @@ function addTypingIndicator() {
 function removeTypingIndicator() {
   const el = document.getElementById('typing-indicator');
   if (el) el.remove();
+}
+
+async function loadChatHistory() {
+  try {
+    const response = await fetch('/api/chat/history');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    messages.innerHTML = '';
+    messages.classList.remove('has-messages');
+    emptyState.style.display = '';
+    for (const message of data.messages || []) {
+      if (message.role === 'user') addMessage('user', escHtml(message.content).replace(/\n/g, '<br>'));
+      else if (message.role === 'assistant') addMessage('assistant', renderMarkdown(message.content));
+    }
+  } catch (error) {
+    console.error('Could not load saved chat history:', error);
+  }
 }
 
 /* ── Streaming response handler ──────────────────────────────────────── */

@@ -6,10 +6,12 @@ An AI agent that connects to INDmoney's MCP server and exposes its tools directl
 
 - **Firebase Hosting** serves the website, PWA manifest, service worker, and icon.
 - **Cloud Run** handles INDmoney OAuth, MCP requests, and OpenAI requests.
-- **Cloud Firestore** stores short-lived per-browser OAuth sessions and refresh tokens.
+- **Cloud Firestore** stores per-login OAuth sessions, refresh tokens, and that session's recent chat history.
 - Hosting rewrites `/api/**` and `/auth/**` to the Cloud Run service so the site and API share one origin. That keeps OAuth cookies same-site.
 
 The agent discovers MCP tool schemas at request time, exposes each tool directly to the model, and proxies tool calls with the signed-in user's OAuth token. OpenAI keys and OAuth tokens stay in the Cloud Run service. See [Firebase Hosting rewrites to Cloud Run](https://firebase.google.com/docs/hosting/cloud-run).
+
+INDmoney OAuth is the app login. Each login gets a random, HTTP-only session cookie and a separate Firestore document. The last 20 user/assistant messages are stored with that session, restored after reload, and sent to the model as context. Disconnecting deletes the session and its history; users can also clear their history from the app. Portfolio requests always use the token held by that same session.
 
 ## Prerequisites
 

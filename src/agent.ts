@@ -19,6 +19,11 @@ export interface Env {
   MCP_SERVER_URL: string;
 }
 
+export interface ConversationMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 type ToolDescriptors = Record<string, {
   description: string;
   inputSchema: z.ZodTypeAny;
@@ -123,7 +128,7 @@ function buildToolDescriptors(
 }
 
 function buildSystemPrompt(): string {
-  return `You are a helpful assistant that answers questions using the available INDmoney MCP tools.
+  return `You are a helpful assistant that answers questions using the available INDmoney MCP tools. Use earlier user and assistant messages as context, especially for follow-up questions.
 
 Call the relevant tools directly when the user asks about their account. Use only the data returned by tools; never invent holdings, balances, transactions, or performance. If a tool fails, report its exact error and do not claim that data was retrieved or retry speculatively.
 
@@ -135,7 +140,12 @@ Use \`bar\` to compare categories and \`donut\` for a part-to-whole split. Inclu
 }
 
 /** Run one chat turn and return the assistant's response as plain text. */
-export async function runAgent(userMessage: string, env: Env, accessToken: string): Promise<Response> {
+export async function runAgent(
+  userMessage: string,
+  env: Env,
+  accessToken: string,
+  history: ConversationMessage[] = []
+): Promise<Response> {
   console.log(`Connecting to MCP server: ${env.MCP_SERVER_URL}`);
 
   let generatedTools: GeneratedTool[];
@@ -174,7 +184,10 @@ export async function runAgent(userMessage: string, env: Env, accessToken: strin
   const result = streamText({
     model: openai("gpt-4o"),
     system: buildSystemPrompt(),
-    messages: [{ role: "user", content: userMessage }],
+    messages: [
+      ...history.map(({ role, content }) => ({ role, content })),
+      { role: "user" as const, content: userMessage },
+    ],
     tools: modelTools,
     stopWhen: [isStepCount(5), () => mcpToolErrors.length > 0],
     onError: (error) => console.error("streamText error:", error),

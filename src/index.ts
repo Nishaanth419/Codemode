@@ -1,6 +1,6 @@
 import express from "express";
 import { Firestore } from "@google-cloud/firestore";
-import { runAgent, type Env } from "./agent";
+import { runAgent, type ConversationMessage, type Env } from "./agent";
 import { fetchMcpSession, mcpToolsToGenerated } from "./mcp-to-ts";
 
 interface OAuthSession {
@@ -12,6 +12,7 @@ interface OAuthSession {
   accessToken?: string;
   refreshToken?: string;
   expiresAt?: number;
+  chatHistory?: ConversationMessage[];
 }
 
 const MCP_RESOURCE = "https://mcp.indmoney.com/mcp";
@@ -19,6 +20,8 @@ const MCP_RESOURCE_METADATA = "https://mcp.indmoney.com/.well-known/oauth-protec
 const SESSION_COOKIE = "indmoney_session";
 const SESSION_COLLECTION = "indmoney_sessions";
 const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_HISTORY_MESSAGES = 20;
+const MAX_HISTORY_MESSAGE_CHARS = 12_000;
 
 const firestore = new Firestore();
 const app = express();
@@ -75,6 +78,24 @@ async function saveSessionStore(sessionId: string, session: OAuthSession): Promi
 
 async function deleteSessionStore(sessionId: string): Promise<void> {
   await firestore.collection(SESSION_COLLECTION).doc(sessionId).delete();
+}
+
+async function appendConversationTurn(sessionId: string, userMessage: string, assistantMessage: string): Promise<void> {
+  const ref = firestore.collection(SESSION_COLLECTION).doc(sessionId);
+  await firestore.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(ref);
+    const session = (snapshot.data() ?? {}) as OAuthSession;
+    const chatHistory = [
+      ...(session.chatHistory ?? []),
+      { role: "user" as const, content: userMessage.slice(0, MAX_HISTORY_MESSAGE_CHARS) },
+      { role: "assistant" as const, content: assistantMessage.slice(0, MAX_HISTORY_MESSAGE_CHARS) },
+    ].slice(-MAX_HISTORY_MESSAGES);
+    transaction.set(ref, {
+      chatHistory,
+      updatedAt: Date.now(),
+      sessionExpiresAt: new Date(Date.now() + SESSION_MAX_AGE_MS),
+    }, { merge: true });
+  });
 }
 
 function publicOrigin(request: express.Request): string {
@@ -255,6 +276,33 @@ app.post("/auth/indmoney/disconnect", async (request, response, next) => {
   } catch (error) { next(error); }
 });
 
+app.get("/api/chat/history", async (request, response, next) => {
+  try {
+    const sessionId = sessionIdFromRequest(request);
+    const accessToken = await accessTokenForRequest(request);
+    if (!sessionId || !accessToken) {
+      response.status(401).json({ error: "Sign in with INDmoney to access your private chat history.", loginUrl: "/auth/indmoney/connect" });
+      return;
+    }
+    const session = await getSessionStore(sessionId);
+    response.json({ messages: session.chatHistory ?? [] });
+  } catch (error) { next(error); }
+});
+
+app.delete("/api/chat/history", async (request, response, next) => {
+  try {
+    const sessionId = sessionIdFromRequest(request);
+    const accessToken = await accessTokenForRequest(request);
+    if (!sessionId || !accessToken) {
+      response.status(401).json({ error: "Sign in with INDmoney to manage your chat history.", loginUrl: "/auth/indmoney/connect" });
+      return;
+    }
+    const session = await getSessionStore(sessionId);
+    await saveSessionStore(sessionId, { ...session, chatHistory: [] });
+    response.json({ messages: [] });
+  } catch (error) { next(error); }
+});
+
 app.get("/api/tools", async (request, response, next) => {
   try {
     const accessToken = await accessTokenForRequest(request);
@@ -276,8 +324,8 @@ app.get("/api/tools", async (request, response, next) => {
 app.post("/api/chat", async (request, response, next) => {
   try {
     const message = request.body?.message;
-    if (typeof message !== "string" || !message.trim()) {
-      response.status(400).json({ error: "Missing 'message' field in request body" });
+    if (typeof message !== "string" || !message.trim() || message.length > 8_000) {
+      response.status(400).json({ error: "Provide a message with no more than 8,000 characters." });
       return;
     }
     if (!env.OPENAI_API_KEY || env.OPENAI_API_KEY === "sk-your-key-here") {
@@ -285,13 +333,20 @@ app.post("/api/chat", async (request, response, next) => {
       return;
     }
     const accessToken = await accessTokenForRequest(request);
-    if (!accessToken) {
+    const sessionId = sessionIdFromRequest(request);
+    if (!accessToken || !sessionId) {
       response.status(401).json({ error: "Connect your INDmoney account before chatting.", loginUrl: "/auth/indmoney/connect" });
       return;
     }
-    const agentResponse = await runAgent(message, env, accessToken);
+    const session = await getSessionStore(sessionId);
+    const history = session.chatHistory ?? [];
+    const agentResponse = await runAgent(message, env, accessToken, history);
+    const answer = await agentResponse.text();
+    if (agentResponse.ok && answer.trim()) {
+      await appendConversationTurn(sessionId, message, answer);
+    }
     response.status(agentResponse.status).type(agentResponse.headers.get("content-type") ?? "text/plain");
-    response.send(await agentResponse.text());
+    response.send(answer);
   } catch (error) { next(error); }
 });
 
