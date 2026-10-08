@@ -78,6 +78,9 @@ ${apiDeclaration}
 5. **Use console.log** — Output is captured and returned to you for debugging.
 6. **Handle errors** — Use try/catch for operations that might fail.
 7. **No network access** — \`fetch()\` is blocked. Use the \`codemode\` API only.
+8. **Report tool failures clearly** — If an MCP call fails, tell the user the tool's
+   exact error and what to try next. Do not claim you fetched data or say you are
+   troubleshooting further unless another tool call succeeds.
 
 ## Example
 
@@ -159,12 +162,28 @@ function buildToolDescriptors(
         }
 
         // Extract the tool result content from the MCP response envelope
+        const rpcError = rpcResult?.error as Record<string, unknown> | undefined;
+        if (rpcError) {
+          const errorMessage = typeof rpcError.message === "string"
+            ? rpcError.message
+            : JSON.stringify(rpcError);
+          throw new Error(`MCP tools/call error for "${gt.name}": ${errorMessage}`);
+        }
+
         const toolResult = rpcResult?.result as Record<string, unknown> | undefined;
         if (toolResult?.content && Array.isArray(toolResult.content)) {
           // MCP returns content as an array of typed content blocks (text, image, etc.)
-          return (toolResult.content as Array<Record<string, unknown>>)
+          const content = (toolResult.content as Array<Record<string, unknown>>)
             .map((block) => block.text ?? JSON.stringify(block))
             .join("\n");
+          if (toolResult.isError === true) {
+            throw new Error(`MCP tool "${gt.name}" failed: ${content || "The server returned an unspecified tool error."}`);
+          }
+          return content;
+        }
+
+        if (toolResult?.isError === true) {
+          throw new Error(`MCP tool "${gt.name}" failed: ${JSON.stringify(toolResult)}`);
         }
 
         return toolResult ?? rpcResult;
