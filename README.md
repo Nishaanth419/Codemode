@@ -11,7 +11,7 @@ An AI agent that connects to INDmoney's MCP server and exposes its tools directl
 
 The agent discovers MCP tool schemas at request time, exposes each tool directly to the model, and proxies tool calls with the signed-in user's OAuth token. OpenAI keys and OAuth tokens stay in the Cloud Run service. See [Firebase Hosting rewrites to Cloud Run](https://firebase.google.com/docs/hosting/cloud-run).
 
-INDmoney OAuth is the app login. Each login gets a random, HTTP-only session cookie and a separate Firestore document. The last 20 user/assistant messages are stored with that session, restored after reload, and sent to the model as context. Disconnecting deletes the session and its history; users can also clear their history from the app. Portfolio requests always use the token held by that same session.
+INDmoney OAuth is the app login. Each login gets a random, HTTP-only session cookie and a separate Firestore document. Conversations are stored as child records under that session, so each signed-in account sees only its own chats. Each chat keeps the latest 20 user/assistant messages, restores them after reload, and sends them to the model as context. Users can start, select, and delete chats. Disconnecting deletes the session and its chats. Portfolio requests always use the token held by that same session.
 
 ## Prerequisites
 
@@ -51,11 +51,14 @@ The web app is available at `http://localhost:8080`. Sign in to INDmoney in the 
 
    If the project already has a Firestore database, keep its current location; do not create another database just for this app.
 
-   Configure automatic cleanup for expired OAuth session documents:
+   Configure automatic cleanup for expired OAuth session and chat documents:
 
    ```bash
    gcloud firestore fields ttls update sessionExpiresAt \
      --collection-group=indmoney_sessions \
+     --enable-ttl
+   gcloud firestore fields ttls update sessionExpiresAt \
+     --collection-group=chats \
      --enable-ttl
    ```
 

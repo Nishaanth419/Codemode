@@ -12,7 +12,13 @@ interface OAuthSession {
   accessToken?: string;
   refreshToken?: string;
   expiresAt?: number;
-  chatHistory?: ConversationMessage[];
+}
+
+interface StoredChat {
+  title: string;
+  messages: ConversationMessage[];
+  updatedAt: number;
+  sessionExpiresAt: Date;
 }
 
 const MCP_RESOURCE = "https://mcp.indmoney.com/mcp";
@@ -22,6 +28,7 @@ const SESSION_COLLECTION = "indmoney_sessions";
 const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_HISTORY_MESSAGES = 20;
 const MAX_HISTORY_MESSAGE_CHARS = 12_000;
+const MAX_CHATS_PER_SESSION = 50;
 
 const firestore = new Firestore();
 const app = express();
@@ -77,24 +84,35 @@ async function saveSessionStore(sessionId: string, session: OAuthSession): Promi
 }
 
 async function deleteSessionStore(sessionId: string): Promise<void> {
-  await firestore.collection(SESSION_COLLECTION).doc(sessionId).delete();
+  const sessionRef = firestore.collection(SESSION_COLLECTION).doc(sessionId);
+  const chats = sessionRef.collection("chats");
+  while (true) {
+    const page = await chats.limit(400).get();
+    if (page.empty) break;
+    const batch = firestore.batch();
+    page.docs.forEach((doc) => batch.delete(doc.ref));
+    await batch.commit();
+  }
+  await sessionRef.delete();
 }
 
-async function appendConversationTurn(sessionId: string, userMessage: string, assistantMessage: string): Promise<void> {
-  const ref = firestore.collection(SESSION_COLLECTION).doc(sessionId);
+async function appendConversationTurn(sessionId: string, chatId: string, userMessage: string, assistantMessage: string): Promise<void> {
+  const ref = firestore.collection(SESSION_COLLECTION).doc(sessionId).collection("chats").doc(chatId);
   await firestore.runTransaction(async (transaction) => {
     const snapshot = await transaction.get(ref);
-    const session = (snapshot.data() ?? {}) as OAuthSession;
-    const chatHistory = [
-      ...(session.chatHistory ?? []),
+    if (!snapshot.exists) throw new Error("That chat was not found in this account.");
+    const chat = snapshot.data() as StoredChat;
+    const messages = [
+      ...(chat.messages ?? []),
       { role: "user" as const, content: userMessage.slice(0, MAX_HISTORY_MESSAGE_CHARS) },
       { role: "assistant" as const, content: assistantMessage.slice(0, MAX_HISTORY_MESSAGE_CHARS) },
     ].slice(-MAX_HISTORY_MESSAGES);
-    transaction.set(ref, {
-      chatHistory,
+    transaction.update(ref, {
+      messages,
+      title: chat.title === "New chat" ? userMessage.slice(0, 60) : chat.title,
       updatedAt: Date.now(),
       sessionExpiresAt: new Date(Date.now() + SESSION_MAX_AGE_MS),
-    }, { merge: true });
+    });
   });
 }
 
@@ -276,7 +294,7 @@ app.post("/auth/indmoney/disconnect", async (request, response, next) => {
   } catch (error) { next(error); }
 });
 
-app.get("/api/chat/history", async (request, response, next) => {
+app.get("/api/chats", async (request, response, next) => {
   try {
     const sessionId = sessionIdFromRequest(request);
     const accessToken = await accessTokenForRequest(request);
@@ -284,22 +302,63 @@ app.get("/api/chat/history", async (request, response, next) => {
       response.status(401).json({ error: "Sign in with INDmoney to access your private chat history.", loginUrl: "/auth/indmoney/connect" });
       return;
     }
-    const session = await getSessionStore(sessionId);
-    response.json({ messages: session.chatHistory ?? [] });
+    const snapshots = await firestore.collection(SESSION_COLLECTION).doc(sessionId)
+      .collection("chats").orderBy("updatedAt", "desc").limit(MAX_CHATS_PER_SESSION).get();
+    response.json({ chats: snapshots.docs.map((doc) => ({ id: doc.id, title: doc.get("title"), updatedAt: doc.get("updatedAt") })) });
   } catch (error) { next(error); }
 });
 
-app.delete("/api/chat/history", async (request, response, next) => {
+app.post("/api/chats", async (request, response, next) => {
   try {
     const sessionId = sessionIdFromRequest(request);
     const accessToken = await accessTokenForRequest(request);
     if (!sessionId || !accessToken) {
-      response.status(401).json({ error: "Sign in with INDmoney to manage your chat history.", loginUrl: "/auth/indmoney/connect" });
+      response.status(401).json({ error: "Sign in with INDmoney to create a private chat.", loginUrl: "/auth/indmoney/connect" });
       return;
     }
-    const session = await getSessionStore(sessionId);
-    await saveSessionStore(sessionId, { ...session, chatHistory: [] });
-    response.json({ messages: [] });
+    const chats = firestore.collection(SESSION_COLLECTION).doc(sessionId).collection("chats");
+    const existing = await chats.orderBy("updatedAt", "asc").limit(MAX_CHATS_PER_SESSION).get();
+    if (existing.size >= MAX_CHATS_PER_SESSION) await existing.docs[0].ref.delete();
+    const id = randomToken();
+    const chat: StoredChat = {
+      title: "New chat",
+      messages: [],
+      updatedAt: Date.now(),
+      sessionExpiresAt: new Date(Date.now() + SESSION_MAX_AGE_MS),
+    };
+    await chats.doc(id).create(chat);
+    response.status(201).json({ id, ...chat });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/chats/:chatId", async (request, response, next) => {
+  try {
+    const sessionId = sessionIdFromRequest(request);
+    const accessToken = await accessTokenForRequest(request);
+    if (!sessionId || !accessToken) {
+      response.status(401).json({ error: "Sign in with INDmoney to access your chats.", loginUrl: "/auth/indmoney/connect" });
+      return;
+    }
+    const snapshot = await firestore.collection(SESSION_COLLECTION).doc(sessionId)
+      .collection("chats").doc(request.params.chatId).get();
+    if (!snapshot.exists) {
+      response.status(404).json({ error: "Chat not found." });
+      return;
+    }
+    response.json({ id: snapshot.id, ...snapshot.data() });
+  } catch (error) { next(error); }
+});
+
+app.delete("/api/chats/:chatId", async (request, response, next) => {
+  try {
+    const sessionId = sessionIdFromRequest(request);
+    const accessToken = await accessTokenForRequest(request);
+    if (!sessionId || !accessToken) {
+      response.status(401).json({ error: "Sign in with INDmoney to delete your chats.", loginUrl: "/auth/indmoney/connect" });
+      return;
+    }
+    await firestore.collection(SESSION_COLLECTION).doc(sessionId).collection("chats").doc(request.params.chatId).delete();
+    response.json({ deleted: true });
   } catch (error) { next(error); }
 });
 
@@ -324,6 +383,7 @@ app.get("/api/tools", async (request, response, next) => {
 app.post("/api/chat", async (request, response, next) => {
   try {
     const message = request.body?.message;
+    const chatId = request.body?.chatId;
     if (typeof message !== "string" || !message.trim() || message.length > 8_000) {
       response.status(400).json({ error: "Provide a message with no more than 8,000 characters." });
       return;
@@ -338,12 +398,22 @@ app.post("/api/chat", async (request, response, next) => {
       response.status(401).json({ error: "Connect your INDmoney account before chatting.", loginUrl: "/auth/indmoney/connect" });
       return;
     }
-    const session = await getSessionStore(sessionId);
-    const history = session.chatHistory ?? [];
+    if (typeof chatId !== "string" || !chatId) {
+      response.status(400).json({ error: "Select a chat before sending a message." });
+      return;
+    }
+    const chatRef = firestore.collection(SESSION_COLLECTION).doc(sessionId).collection("chats").doc(chatId);
+    const chatSnapshot = await chatRef.get();
+    if (!chatSnapshot.exists) {
+      response.status(404).json({ error: "Chat not found in this account." });
+      return;
+    }
+    const chat = chatSnapshot.data() as StoredChat;
+    const history = chat.messages ?? [];
     const agentResponse = await runAgent(message, env, accessToken, history);
     const answer = await agentResponse.text();
     if (agentResponse.ok && answer.trim()) {
-      await appendConversationTurn(sessionId, message, answer);
+      await appendConversationTurn(sessionId, chatId, message, answer);
     }
     response.status(agentResponse.status).type(agentResponse.headers.get("content-type") ?? "text/plain");
     response.send(answer);

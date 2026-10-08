@@ -146,7 +146,6 @@
       background: linear-gradient(135deg, var(--accent), #4f46e5);
       font: 600 13px var(--font-sans); cursor: pointer;
     }
-    #clear-history-button { margin-left: 0; }
 
     /* ── Sidebar ─────────────────────────────────────────────────── */
     #sidebar {
@@ -214,7 +213,7 @@
       color: var(--text-secondary);
     }
 
-    #tools-list {
+    #chat-list {
       flex: 1;
       overflow-y: auto;
       padding: 8px;
@@ -222,6 +221,18 @@
       flex-direction: column;
       gap: 4px;
     }
+
+    .chat-row { display: flex; align-items: center; gap: 4px; }
+    .chat-select {
+      flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      text-align: left; padding: 10px 12px; color: var(--text-secondary);
+      background: transparent; border: 1px solid transparent; border-radius: var(--radius-md);
+      font: 12px var(--font-sans); cursor: pointer;
+    }
+    .chat-select:hover, .chat-select.active { color: var(--text-primary); background: var(--bg-card); border-color: var(--border); }
+    .chat-delete { border: 0; background: transparent; color: var(--text-muted); cursor: pointer; padding: 6px; }
+    .chat-delete:hover { color: var(--error); }
+    #new-chat-button { margin-left: auto; border: 1px solid var(--border-hover); border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--text-primary); padding: 6px 9px; font: 500 11px var(--font-sans); cursor: pointer; white-space: nowrap; }
 
     .tool-card {
       padding: 10px 12px;
@@ -696,7 +707,11 @@
       .logo-sub { display: none; }
       #status-badge { padding: 4px 7px; font-size: 11px; }
       .auth-button { padding: 6px 8px; font-size: 10px; }
-      #sidebar { display: none; }
+      #main { flex-direction: column; }
+      #sidebar { display: flex; width: 100%; min-width: 0; height: 135px; border-right: 0; border-bottom: 1px solid var(--border); }
+      #chat-list { flex-direction: row; overflow-x: auto; overflow-y: hidden; }
+      .chat-row { flex: 0 0 190px; }
+      #chat-area { flex: 1; min-height: 0; }
       .message { padding: 0 16px; }
       #input-area { padding: 12px 16px 16px; }
     }
@@ -712,7 +727,6 @@
       <div class="logo-sub">Direct INDmoney MCP tools</div>
   </div>
   <div class="topbar-spacer"></div>
-  <button id="clear-history-button" class="auth-button" type="button" style="display:none">Clear chat</button>
   <button id="auth-button" class="auth-button" type="button">Connect INDmoney</button>
   <div id="status-badge">
     <div class="status-dot" id="status-dot"></div>
@@ -735,19 +749,10 @@
   <!-- Sidebar: Tools -->
   <aside id="sidebar">
     <div class="sidebar-header">
-      <span class="sidebar-title">MCP Tools</span>
-      <span id="tool-count" style="display:none"></span>
+      <span class="sidebar-title">Your chats</span>
+      <button id="new-chat-button" type="button">+ New chat</button>
     </div>
-    <div id="mcp-server-tag">
-      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
-      <span id="mcp-server-url">Loading…</span>
-    </div>
-    <div id="tools-list">
-      <!-- Skeletons -->
-      <div class="skeleton-tool skeleton"><div class="skeleton-line" style="width:70%"></div><div class="skeleton-line" style="width:90%"></div><div class="skeleton-line" style="width:55%"></div></div>
-      <div class="skeleton-tool skeleton"><div class="skeleton-line" style="width:80%"></div><div class="skeleton-line" style="width:60%"></div></div>
-      <div class="skeleton-tool skeleton"><div class="skeleton-line" style="width:65%"></div><div class="skeleton-line" style="width:75%"></div><div class="skeleton-line" style="width:40%"></div></div>
-    </div>
+    <div id="chat-list"></div>
   </aside>
 
   <!-- Chat -->
@@ -790,15 +795,10 @@
 </div>
 
 <!-- Tool detail tooltip -->
-<div id="tool-detail">
-  <div class="td-name" id="td-name"></div>
-  <div class="td-sig" id="td-sig"></div>
-  <div class="td-desc" id="td-desc"></div>
-</div>
-
 <script>
 /* ── State ─────────────────────────────────────────────────────────── */
-let tools = [];
+let chats = [];
+let activeChatId = null;
 let isStreaming = false;
 
 if ('serviceWorker' in navigator) {
@@ -810,16 +810,13 @@ if ('serviceWorker' in navigator) {
 /* ── DOM refs ──────────────────────────────────────────────────────── */
 const statusDot  = document.getElementById('status-dot');
 const statusText = document.getElementById('status-text');
-const toolCount  = document.getElementById('tool-count');
-const mcpUrl     = document.getElementById('mcp-server-url');
-const toolsList  = document.getElementById('tools-list');
+const chatList   = document.getElementById('chat-list');
+const newChatButton = document.getElementById('new-chat-button');
 const emptyState = document.getElementById('empty-state');
 const messages   = document.getElementById('messages');
 const userInput  = document.getElementById('user-input');
 const sendBtn    = document.getElementById('send-btn');
-const toolDetail = document.getElementById('tool-detail');
 const authButton = document.getElementById('auth-button');
-const clearHistoryButton = document.getElementById('clear-history-button');
 const loginScreen = document.getElementById('login-screen');
 const loginCta = document.getElementById('login-cta');
 const mainLayout = document.getElementById('main');
@@ -832,38 +829,34 @@ function setStatus(state, label) {
 }
 
 /* ── Load MCP tools from /api/tools ─────────────────────────────────── */
-async function loadTools() {
+async function loadChats() {
   try {
-    const res = await fetch('/api/tools');
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error([data.error, data.details].filter(Boolean).join(': ') || `HTTP ${res.status}`);
-
-    tools = data.tools || [];
-    isConnected = data.connected === true;
-    authButton.textContent = isConnected ? 'Disconnect' : 'Connect INDmoney';
-    authButton.title = isConnected ? 'Disconnect your INDmoney account' : 'Sign in securely with INDmoney';
-    authButton.style.display = isConnected ? '' : 'none';
-    clearHistoryButton.style.display = isConnected ? '' : 'none';
-    loginScreen.style.display = isConnected ? 'none' : 'flex';
-    mainLayout.style.display = isConnected ? 'flex' : 'none';
-    toolCount.textContent = tools.length;
-    toolCount.style.display = '';
-
-    // Display the MCP server URL (shortened)
-    const url = data.mcpServer || '';
-    mcpUrl.title = url;
-    mcpUrl.textContent = url.replace(/^https?:\/\//, '');
-
-    if (isConnected) {
-      renderTools();
-      await loadChatHistory();
-      setStatus('online', `${tools.length} tools loaded`);
-    } else {
-      toolsList.innerHTML = '<div class="tools-loading">Connect your INDmoney account to load your tools.</div>';
-      setStatus('', 'Not connected');
+    const response = await fetch('/api/chats');
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 401) {
+        isConnected = false;
+        authButton.style.display = 'none';
+        loginScreen.style.display = 'flex';
+        mainLayout.style.display = 'none';
+        setStatus('', 'Sign in required');
+        return;
+      }
+      throw new Error(data.error || ('HTTP ' + response.status));
     }
+    isConnected = true;
+    authButton.textContent = 'Disconnect';
+    authButton.title = 'Disconnect your INDmoney account';
+    authButton.style.display = '';
+    loginScreen.style.display = 'none';
+    mainLayout.style.display = 'flex';
+    chats = data.chats || [];
+    renderChats();
+    if (chats.length) await selectChat(chats[0].id);
+    else await startNewChat();
+    setStatus('online', chats.length + ' chats');
   } catch (err) {
-    toolsList.innerHTML = `<div class="tools-error">⚠ Failed to load tools<br><small>${err.message}</small></div>`;
+    chatList.innerHTML = '<div class="tools-error">Could not load chats<br><small>' + escHtml(err.message) + '</small></div>';
     setStatus('error', 'Connection failed');
   }
 }
@@ -881,61 +874,96 @@ authButton.addEventListener('click', async () => {
     messages.innerHTML = '';
     messages.classList.remove('has-messages');
     emptyState.style.display = '';
-    await loadTools();
+    chats = [];
+    activeChatId = null;
+    await loadChats();
   } finally {
     authButton.disabled = false;
   }
 });
 
-clearHistoryButton.addEventListener('click', async () => {
-  if (!window.confirm('Delete your saved chat history?')) return;
-  clearHistoryButton.disabled = true;
-  try {
-    const response = await fetch('/api/chat/history', { method: 'DELETE' });
-    if (!response.ok) throw new Error(`Could not clear chat history (HTTP ${response.status}).`);
-    messages.innerHTML = '';
-    messages.classList.remove('has-messages');
-    emptyState.style.display = '';
-  } catch (error) {
-    addMessage('assistant', `<span style="color:var(--error)">${escHtml(error.message)}</span>`);
-  } finally {
-    clearHistoryButton.disabled = false;
+function renderChats() {
+  chatList.innerHTML = '';
+  for (const chat of chats) {
+    const row = document.createElement('div');
+    row.className = 'chat-row';
+    const select = document.createElement('button');
+    select.type = 'button';
+    select.className = 'chat-select' + (chat.id === activeChatId ? ' active' : '');
+    select.textContent = chat.title || 'New chat';
+    select.title = select.textContent;
+    select.addEventListener('click', () => selectChat(chat.id).catch((error) => {
+      addMessage('assistant', '<span style="color:var(--error)">' + escHtml(error.message) + '</span>');
+    }));
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'chat-delete';
+    remove.textContent = '×';
+    remove.title = 'Delete chat';
+    remove.setAttribute('aria-label', 'Delete ' + (chat.title || 'chat'));
+    remove.addEventListener('click', (event) => {
+      event.stopPropagation();
+      deleteChat(chat.id).catch((error) => addMessage('assistant', '<span style="color:var(--error)">' + escHtml(error.message) + '</span>'));
+    });
+    row.append(select, remove);
+    chatList.appendChild(row);
   }
-});
-
-function renderTools() {
-  if (!tools.length) {
-    toolsList.innerHTML = '<div class="tools-loading">No tools found</div>';
-    return;
-  }
-  toolsList.innerHTML = '';
-  tools.forEach((t, i) => {
-    const card = document.createElement('div');
-    card.className = 'tool-card';
-    card.innerHTML = `
-      <div class="tool-name">${escHtml(t.name)}</div>
-      <div class="tool-sig">${escHtml(t.tsSignature || '')}</div>
-      <div class="tool-desc">${escHtml(t.description || '')}</div>
-    `;
-    card.addEventListener('mouseenter', (e) => showToolDetail(t, e));
-    card.addEventListener('mouseleave', hideToolDetail);
-    toolsList.appendChild(card);
-  });
 }
 
-/* ── Tool detail tooltip ─────────────────────────────────────────────── */
-function showToolDetail(tool, e) {
-  document.getElementById('td-name').textContent = tool.name;
-  document.getElementById('td-sig').textContent = `${tool.name}${tool.tsSignature || '()'}`;
-  document.getElementById('td-desc').textContent = tool.description || '';
-
-  const rect = e.target.getBoundingClientRect();
-  const sidebar = document.getElementById('sidebar').getBoundingClientRect();
-  toolDetail.style.left = (sidebar.right + 10) + 'px';
-  toolDetail.style.top  = Math.min(rect.top, window.innerHeight - 200) + 'px';
-  toolDetail.classList.add('visible');
+async function refreshChats() {
+  const response = await fetch('/api/chats');
+  if (!response.ok) throw new Error('Could not refresh the chat list.');
+  chats = (await response.json()).chats || [];
+  renderChats();
+  setStatus('online', chats.length + ' chats');
 }
-function hideToolDetail() { toolDetail.classList.remove('visible'); }
+
+async function startNewChat() {
+  if (isStreaming) return;
+  const response = await fetch('/api/chats', { method: 'POST' });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Could not create a new chat.');
+  chats.unshift(data);
+  activeChatId = data.id;
+  messages.innerHTML = '';
+  messages.classList.remove('has-messages');
+  emptyState.style.display = '';
+  renderChats();
+  userInput.focus();
+}
+
+async function selectChat(chatId) {
+  if (isStreaming) return;
+  const response = await fetch('/api/chats/' + encodeURIComponent(chatId));
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Could not open this chat.');
+  activeChatId = chatId;
+  messages.innerHTML = '';
+  messages.classList.remove('has-messages');
+  emptyState.style.display = '';
+  for (const message of data.messages || []) {
+    if (message.role === 'user') addMessage('user', escHtml(message.content).replace(/\n/g, '<br>'));
+    else if (message.role === 'assistant') addMessage('assistant', renderMarkdown(message.content));
+  }
+  renderChats();
+}
+
+async function deleteChat(chatId) {
+  if (isStreaming) return;
+  if (!window.confirm('Delete this chat?')) return;
+  const response = await fetch('/api/chats/' + encodeURIComponent(chatId), { method: 'DELETE' });
+  if (!response.ok) throw new Error('Could not delete this chat.');
+  chats = chats.filter((chat) => chat.id !== chatId);
+  if (activeChatId === chatId) {
+    activeChatId = null;
+    if (chats.length) await selectChat(chats[0].id);
+    else await startNewChat();
+  } else renderChats();
+}
+
+newChatButton.addEventListener('click', () => startNewChat().catch((error) => {
+  addMessage('assistant', '<span style="color:var(--error)">' + escHtml(error.message) + '</span>');
+}));
 
 /* ── Chat ────────────────────────────────────────────────────────────── */
 function showMessages() {
@@ -990,23 +1018,6 @@ function removeTypingIndicator() {
   if (el) el.remove();
 }
 
-async function loadChatHistory() {
-  try {
-    const response = await fetch('/api/chat/history');
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    messages.innerHTML = '';
-    messages.classList.remove('has-messages');
-    emptyState.style.display = '';
-    for (const message of data.messages || []) {
-      if (message.role === 'user') addMessage('user', escHtml(message.content).replace(/\n/g, '<br>'));
-      else if (message.role === 'assistant') addMessage('assistant', renderMarkdown(message.content));
-    }
-  } catch (error) {
-    console.error('Could not load saved chat history:', error);
-  }
-}
-
 /* ── Streaming response handler ──────────────────────────────────────── */
 async function sendMessage(text) {
   if (!text.trim() || isStreaming) return;
@@ -1024,7 +1035,7 @@ async function sendMessage(text) {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({ message: text, chatId: activeChatId }),
     });
 
     if (!res.ok) {
@@ -1063,7 +1074,7 @@ async function sendMessage(text) {
       bodyDiv.innerHTML = '<em>The model returned no text. Check the Worker logs for the provider error.</em>';
     }
 
-    setStatus('online', `${tools.length} tools ready`);
+    await refreshChats();
   } catch (err) {
     removeTypingIndicator();
     addMessage('assistant',
@@ -1285,7 +1296,7 @@ document.querySelectorAll('.example-prompt').forEach(btn => {
 });
 
 /* ── Init ────────────────────────────────────────────────────────────── */
-loadTools();
+loadChats();
 userInput.focus();
 </script>
 </body>
