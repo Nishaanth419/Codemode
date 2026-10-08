@@ -28,7 +28,7 @@ import type { ToolDescriptors } from "@cloudflare/codemode/ai";
 import { z } from "zod";
 
 import {
-  fetchMcpTools,
+  fetchMcpSession,
   mcpToolsToGenerated,
   generateApiDeclaration,
   type GeneratedTool,
@@ -39,6 +39,7 @@ export interface Env {
   LOADER: unknown; // Worker Loader binding (Dynamic Workers API)
   OPENAI_API_KEY: string;
   MCP_SERVER_URL: string;
+  AUTH_SESSIONS: DurableObjectNamespace;
 }
 
 /**
@@ -101,7 +102,8 @@ results
 function buildToolDescriptors(
   generatedTools: GeneratedTool[],
   mcpServerUrl: string,
-  sessionId: string | null
+  sessionId: string | null,
+  accessToken: string
 ): ToolDescriptors {
   const descriptors: ToolDescriptors = {};
 
@@ -114,6 +116,7 @@ function buildToolDescriptors(
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
           Accept: "application/json, text/event-stream",
+          Authorization: `Bearer ${accessToken}`,
         };
         if (sessionId) {
           headers["mcp-session-id"] = sessionId;
@@ -182,7 +185,7 @@ function buildToolDescriptors(
  * @param env - Worker environment bindings
  * @returns A streaming Response
  */
-export async function runAgent(userMessage: string, env: Env): Promise<Response> {
+export async function runAgent(userMessage: string, env: Env, accessToken: string): Promise<Response> {
   // Step 1: Connect to the MCP server and fetch tool schemas
   console.log(`Connecting to MCP server: ${env.MCP_SERVER_URL}`);
 
@@ -190,30 +193,11 @@ export async function runAgent(userMessage: string, env: Env): Promise<Response>
   let sessionId: string | null = null;
 
   try {
-    // Initialize the MCP session first to get a session ID for subsequent calls
-    const initResponse = await fetch(env.MCP_SERVER_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json, text/event-stream",
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-03-26",
-          capabilities: {},
-          clientInfo: { name: "code-mode-agent", version: "1.0.0" },
-        },
-      }),
-    });
-
-    sessionId = initResponse.headers.get("mcp-session-id");
-
-    // fetchMcpTools handles the full init + tools/list flow
-    const mcpTools = await fetchMcpTools(env.MCP_SERVER_URL);
-    generatedTools = mcpToolsToGenerated(mcpTools);
+    // Keep the tools/list session ID for the later tools/call requests.
+    // Creating a second session here caused calls to use a stale session.
+    const mcpSession = await fetchMcpSession(env.MCP_SERVER_URL, accessToken);
+    sessionId = mcpSession.sessionId;
+    generatedTools = mcpToolsToGenerated(mcpSession.tools);
     console.log(`Loaded ${generatedTools.length} tools from MCP server`);
   } catch (error) {
     console.error("Failed to connect to MCP server:", error);
@@ -231,7 +215,7 @@ export async function runAgent(userMessage: string, env: Env): Promise<Response>
   const systemPrompt = buildSystemPrompt(apiDeclaration);
 
   // Step 3: Build ToolDescriptors and wrap them with aiTools() for the codemode library
-  const toolDescriptors = buildToolDescriptors(generatedTools, env.MCP_SERVER_URL, sessionId);
+  const toolDescriptors = buildToolDescriptors(generatedTools, env.MCP_SERVER_URL, sessionId, accessToken);
   const toolProvider = aiTools(toolDescriptors);
 
   // Step 4: Create the sandbox executor

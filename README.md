@@ -60,26 +60,18 @@ Code Mode flips this: the LLM writes a single code snippet that orchestrates mul
 # 1. Install dependencies
 npm install
 
-# 2. Set your OpenAI API key in .env
-echo "OPENAI_API_KEY=sk-your-actual-key" > .env
+# 2. Set your OpenAI API key in .dev.vars
+echo "OPENAI_API_KEY=sk-your-actual-key" > .dev.vars
 
 # 3. Start the dev server
 npm run dev
 ```
 
-The server starts at `http://localhost:8787`.
+The server starts at `http://localhost:8787`. Open it in a browser and choose **Connect INDmoney**. Sign in and approve the requested read-only access on INDmoney's page; the app never asks for your OTP or MPIN.
 
-### Test it
+The OAuth authorization code flow uses PKCE. Tokens are kept in a Durable Object session and refreshed when possible. The browser receives only an HTTP-only session cookie.
 
-```bash
-# Check available MCP tools
-curl http://localhost:8787/api/tools | jq .
-
-# Send a message to the agent
-curl -X POST http://localhost:8787/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What tools are available in the Cloudflare Agents SDK?"}'
-```
+After connecting, ask a question in the chat. Use **Disconnect** to revoke the INDmoney access token and clear the local session.
 
 ## Project Structure
 
@@ -112,7 +104,9 @@ curl -X POST http://localhost:8787/api/chat \
    MCP_SERVER_URL = "https://your-mcp-server.example.com/mcp"
    ```
 
-2. **That's it!** The agent automatically:
+2. For OAuth protected services, implement their OAuth discovery and token flow before connecting. The included OAuth routes target INDmoney's published MCP authorization metadata.
+
+3. Once configured, the agent automatically:
    - Connects to the new server on each request
    - Fetches tool schemas via `tools/list`
    - Generates TypeScript declarations
@@ -154,6 +148,8 @@ wrangler secret put OPENAI_API_KEY
 # Deploy to Cloudflare
 npm run deploy
 ```
+
+The deployment needs the `AuthSessionStore` Durable Object binding and migration declared in `wrangler.toml`. OAuth callback URLs use the current application origin, so use the deployed HTTPS URL when connecting in production.
 
 ## References
 

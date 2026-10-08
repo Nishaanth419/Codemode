@@ -14,6 +14,14 @@ fallthrough = false
 [[worker_loaders]]
 binding = "LOADER"
 
+[[durable_objects.bindings]]
+name = "AUTH_SESSIONS"
+class_name = "AuthSessionStore"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AuthSessionStore"]
+
 # Environment variables — set these via `wrangler secret put` or .env
 # OPENAI_API_KEY is required for the LLM calls via Vercel AI SDK.
 [vars]

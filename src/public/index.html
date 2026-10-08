@@ -144,6 +144,19 @@
       gap: 8px;
     }
 
+    .auth-button {
+      margin-left: auto;
+      border: 1px solid var(--border-hover);
+      border-radius: var(--radius-sm);
+      background: var(--accent-soft);
+      color: var(--text-primary);
+      padding: 6px 9px;
+      font: 500 11px var(--font-sans);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .auth-button:hover { border-color: var(--accent); }
+
     .sidebar-title {
       font-size: 11px;
       font-weight: 600;
@@ -663,6 +676,7 @@
     <div class="sidebar-header">
       <span class="sidebar-title">MCP Tools</span>
       <span id="tool-count" style="display:none"></span>
+      <button id="auth-button" class="auth-button" type="button">Connect INDmoney</button>
     </div>
     <div id="mcp-server-tag">
       <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
@@ -690,9 +704,9 @@
         </div>
       </div>
       <div class="example-prompts">
-        <button class="example-prompt" data-prompt="Search the Cloudflare Agents docs for information about Durable Objects and summarize the key concepts.">📚 Search Agents docs about Durable Objects</button>
-        <button class="example-prompt" data-prompt="Fetch the main Cloudflare Agents documentation page and list all the major sections.">🗂️ List all major sections in the Agents docs</button>
-        <button class="example-prompt" data-prompt="Search the Cloudflare Agents codebase for examples of how to use AIChatAgent and show me the most relevant code snippets.">🔍 Find AIChatAgent usage examples in the codebase</button>
+        <button class="example-prompt" data-prompt="Summarize my portfolio allocation by asset class.">📊 Summarize my portfolio allocation</button>
+        <button class="example-prompt" data-prompt="Show my top holdings by current value and explain the largest concentration.">💼 Review my top holdings</button>
+        <button class="example-prompt" data-prompt="List my active SIPs and their monthly amounts.">📈 List my active SIPs</button>
       </div>
     </div>
 
@@ -739,6 +753,8 @@ const messages   = document.getElementById('messages');
 const userInput  = document.getElementById('user-input');
 const sendBtn    = document.getElementById('send-btn');
 const toolDetail = document.getElementById('tool-detail');
+const authButton = document.getElementById('auth-button');
+let isConnected = false;
 
 /* ── Status helpers ─────────────────────────────────────────────────── */
 function setStatus(state, label) {
@@ -750,10 +766,13 @@ function setStatus(state, label) {
 async function loadTools() {
   try {
     const res = await fetch('/api/tools');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error([data.error, data.details].filter(Boolean).join(': ') || `HTTP ${res.status}`);
 
     tools = data.tools || [];
+    isConnected = data.connected === true;
+    authButton.textContent = isConnected ? 'Disconnect' : 'Connect INDmoney';
+    authButton.title = isConnected ? 'Disconnect your INDmoney account' : 'Sign in securely with INDmoney';
     toolCount.textContent = tools.length;
     toolCount.style.display = '';
 
@@ -762,13 +781,32 @@ async function loadTools() {
     mcpUrl.title = url;
     mcpUrl.textContent = url.replace(/^https?:\/\//, '');
 
-    renderTools();
-    setStatus('online', `${tools.length} tools loaded`);
+    if (isConnected) {
+      renderTools();
+      setStatus('online', `${tools.length} tools loaded`);
+    } else {
+      toolsList.innerHTML = '<div class="tools-loading">Connect your INDmoney account to load your tools.</div>';
+      setStatus('', 'Not connected');
+    }
   } catch (err) {
     toolsList.innerHTML = `<div class="tools-error">⚠ Failed to load tools<br><small>${err.message}</small></div>`;
     setStatus('error', 'Connection failed');
   }
 }
+
+authButton.addEventListener('click', async () => {
+  if (!isConnected) {
+    window.location.assign('/auth/indmoney/connect');
+    return;
+  }
+  authButton.disabled = true;
+  try {
+    await fetch('/auth/indmoney/disconnect', { method: 'POST' });
+    await loadTools();
+  } finally {
+    authButton.disabled = false;
+  }
+});
 
 function renderTools() {
   if (!tools.length) {
@@ -879,7 +917,11 @@ async function sendMessage(text) {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-      throw new Error(err.error || err.details || `HTTP ${res.status}`);
+      if (err.loginUrl) {
+        const connectLink = `<br><a href="${escHtml(err.loginUrl)}" style="color:var(--accent-2)">Connect INDmoney</a>`;
+        throw Object.assign(new Error(err.error || 'Connect your INDmoney account.'), { connectLink });
+      }
+      throw new Error([err.error, err.details].filter(Boolean).join(': ') || `HTTP ${res.status}`);
     }
 
     removeTypingIndicator();
@@ -906,15 +948,14 @@ async function sendMessage(text) {
     }
 
     if (rawText.trim() === '') {
-      bodyDiv.innerHTML = '<em>No response</em>';
+      bodyDiv.innerHTML = '<em>The model returned no text. Check the Worker logs for the provider error.</em>';
     }
 
     setStatus('online', `${tools.length} tools ready`);
   } catch (err) {
     removeTypingIndicator();
     addMessage('assistant',
-      `<span style="color:var(--error)">⚠ Error: ${escHtml(err.message)}</span><br>
-       <small style="color:var(--text-muted)">Make sure your OPENAI_API_KEY is set in .env</small>`
+      `<span style="color:var(--error)">⚠ Error: ${escHtml(err.message)}</span>${err.connectLink || ''}`
     );
     setStatus('error', 'Request failed');
   } finally {

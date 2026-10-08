@@ -62,13 +62,20 @@ export interface GeneratedTool {
  * @param serverUrl - Base URL of the MCP server (e.g., "https://gitmcp.io/cloudflare/agents")
  * @returns Array of MCP tool definitions
  */
-export async function fetchMcpTools(serverUrl: string): Promise<McpToolDefinition[]> {
+export async function fetchMcpSession(serverUrl: string, accessToken?: string): Promise<{
+  tools: McpToolDefinition[];
+  sessionId: string | null;
+}> {
   // Step 1: Initialize the MCP session
+  const authHeaders: Record<string, string> = accessToken
+    ? { Authorization: `Bearer ${accessToken}` }
+    : {};
   const initResponse = await fetch(serverUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json, text/event-stream",
+      ...authHeaders,
     },
     body: JSON.stringify({
       jsonrpc: "2.0",
@@ -83,7 +90,18 @@ export async function fetchMcpTools(serverUrl: string): Promise<McpToolDefinitio
   });
 
   if (!initResponse.ok) {
-    throw new Error(`MCP initialize failed: ${initResponse.status} ${initResponse.statusText}`);
+    const authChallenge = initResponse.headers.get("www-authenticate");
+    const responseBody = (await initResponse.text()).slice(0, 500);
+    const authHint = initResponse.status === 401
+      ? accessToken
+        ? " INDmoney rejected the saved OAuth token; reconnect the account."
+        : " INDmoney requires OAuth sign-in; this request has no user token."
+      : "";
+    throw new Error(
+      `MCP initialize failed: ${initResponse.status} ${initResponse.statusText}.${authHint}` +
+      (authChallenge ? ` WWW-Authenticate: ${authChallenge}.` : "") +
+      (responseBody ? ` Response: ${responseBody}` : "")
+    );
   }
 
   // Extract session ID from response headers if present
@@ -100,6 +118,7 @@ export async function fetchMcpTools(serverUrl: string): Promise<McpToolDefinitio
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
   };
+  Object.assign(notifyHeaders, authHeaders);
   if (sessionId) {
     notifyHeaders["mcp-session-id"] = sessionId;
   }
@@ -118,6 +137,7 @@ export async function fetchMcpTools(serverUrl: string): Promise<McpToolDefinitio
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
   };
+  Object.assign(toolsHeaders, authHeaders);
   if (sessionId) {
     toolsHeaders["mcp-session-id"] = sessionId;
   }
@@ -134,7 +154,11 @@ export async function fetchMcpTools(serverUrl: string): Promise<McpToolDefinitio
   });
 
   if (!toolsResponse.ok) {
-    throw new Error(`MCP tools/list failed: ${toolsResponse.status} ${toolsResponse.statusText}`);
+    const responseBody = (await toolsResponse.text()).slice(0, 500);
+    throw new Error(
+      `MCP tools/list failed: ${toolsResponse.status} ${toolsResponse.statusText}` +
+      (responseBody ? `. Response: ${responseBody}` : "")
+    );
   }
 
   const toolsResult = await parseJsonRpcResponse(toolsResponse);
@@ -145,7 +169,13 @@ export async function fetchMcpTools(serverUrl: string): Promise<McpToolDefinitio
     throw new Error(`MCP tools/list returned unexpected result: ${JSON.stringify(toolsResult)}`);
   }
 
-  return tools as McpToolDefinition[];
+  return { tools: tools as McpToolDefinition[], sessionId };
+}
+
+/** Convenience wrapper for callers that only need the tool definitions. */
+export async function fetchMcpTools(serverUrl: string): Promise<McpToolDefinition[]> {
+  const session = await fetchMcpSession(serverUrl);
+  return session.tools;
 }
 
 /**
