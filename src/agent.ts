@@ -78,6 +78,21 @@ ${apiDeclaration}
 5. **Use console.log** — Output is captured and returned to you for debugging.
 6. **Handle errors** — Use try/catch for operations that might fail.
 7. **No network access** — \`fetch()\` is blocked. Use the \`codemode\` API only.
+8. **Report tool failures clearly** — If an MCP call fails, tell the user the tool's
+   exact error and what to try next. Do not claim you fetched data or say you are
+   troubleshooting further unless another tool call succeeds. Make one attempt per
+   tool call; do not retry, switch tools speculatively, or emit progress messages.
+9. **Visualize data proactively** — When tool results contain comparable numeric
+   data (such as portfolio holdings, allocations, balances over time, or category
+   totals), include a chart in your answer without asking the user which chart they
+   want. Put one chart in a \`chart\` fenced block using valid JSON:
+   {"type":"bar","title":"Current value by holding","unit":"₹","data":[{"label":"Fund A","value":125000}]}
+   Use \`bar\` for comparing categories and \`donut\` for a part-to-whole split.
+   Keep the chart to relevant top items (usually 5–10), and explain the largest
+   concentration in the surrounding text. Only chart values returned by tools;
+   never invent data. If the tool call fails or provides no numeric data, explain
+   that clearly and do not fabricate a chart. Do not ask the user to choose a
+   visualization when the data supports a sensible default.
 
 ## Example
 
@@ -103,7 +118,9 @@ function buildToolDescriptors(
   generatedTools: GeneratedTool[],
   mcpServerUrl: string,
   sessionId: string | null,
-  accessToken: string
+  accessToken: string,
+  protocolVersion: string,
+  onToolError: (message: string) => void
 ): ToolDescriptors {
   const descriptors: ToolDescriptors = {};
 
@@ -112,62 +129,89 @@ function buildToolDescriptors(
       description: gt.description,
       inputSchema: gt.parameters as z.ZodType,
       execute: async (args: unknown) => {
-        // Forward the tool call to the MCP server via JSON-RPC
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json",
-          Accept: "application/json, text/event-stream",
-          Authorization: `Bearer ${accessToken}`,
-        };
-        if (sessionId) {
-          headers["mcp-session-id"] = sessionId;
-        }
+        try {
+          // Forward the tool call to the MCP server via JSON-RPC
+          const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            Authorization: `Bearer ${accessToken}`,
+            "MCP-Protocol-Version": protocolVersion,
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": gt.name,
+          };
+          if (sessionId) {
+            headers["mcp-session-id"] = sessionId;
+          }
 
-        const response = await fetch(mcpServerUrl, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            jsonrpc: "2.0",
-            id: Date.now(),
-            method: "tools/call",
-            params: { name: gt.name, arguments: args },
-          }),
-        });
+          const response = await fetch(mcpServerUrl, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id: Date.now(),
+              method: "tools/call",
+              params: { name: gt.name, arguments: args },
+            }),
+          });
 
-        if (!response.ok) {
-          throw new Error(
-            `MCP tools/call failed for "${gt.name}": ${response.status} ${response.statusText}`
-          );
-        }
+          if (!response.ok) {
+            const responseBody = (await response.text()).slice(0, 500);
+            throw new Error(
+              `MCP tools/call failed for "${gt.name}": ${response.status} ${response.statusText}` +
+              (responseBody ? `. Response: ${responseBody}` : "")
+            );
+          }
 
-        // Parse response (may be JSON or SSE stream)
-        const contentType = response.headers.get("content-type") ?? "";
-        let rpcResult: Record<string, unknown> | null = null;
+          // Parse response (may be JSON or SSE stream)
+          const contentType = response.headers.get("content-type") ?? "";
+          let rpcResult: Record<string, unknown> | null = null;
 
-        if (contentType.includes("text/event-stream")) {
-          const text = await response.text();
-          for (const line of text.split("\n")) {
-            if (line.startsWith("data: ")) {
-              const data = line.slice(6).trim();
-              if (data && data !== "[DONE]") {
-                rpcResult = JSON.parse(data) as Record<string, unknown>;
-                break;
+          if (contentType.includes("text/event-stream")) {
+            const text = await response.text();
+            for (const line of text.split("\n")) {
+              if (line.startsWith("data: ")) {
+                const data = line.slice(6).trim();
+                if (data && data !== "[DONE]") {
+                  rpcResult = JSON.parse(data) as Record<string, unknown>;
+                  break;
+                }
               }
             }
+          } else {
+            rpcResult = (await response.json()) as Record<string, unknown>;
           }
-        } else {
-          rpcResult = (await response.json()) as Record<string, unknown>;
-        }
 
-        // Extract the tool result content from the MCP response envelope
-        const toolResult = rpcResult?.result as Record<string, unknown> | undefined;
-        if (toolResult?.content && Array.isArray(toolResult.content)) {
-          // MCP returns content as an array of typed content blocks (text, image, etc.)
-          return (toolResult.content as Array<Record<string, unknown>>)
-            .map((block) => block.text ?? JSON.stringify(block))
-            .join("\n");
-        }
+          // Extract the tool result content from the MCP response envelope
+          const rpcError = rpcResult?.error as Record<string, unknown> | undefined;
+          if (rpcError) {
+            const errorMessage = typeof rpcError.message === "string"
+              ? rpcError.message
+              : JSON.stringify(rpcError);
+            throw new Error(`MCP tools/call error for "${gt.name}": ${errorMessage}`);
+          }
 
-        return toolResult ?? rpcResult;
+          const toolResult = rpcResult?.result as Record<string, unknown> | undefined;
+          if (toolResult?.content && Array.isArray(toolResult.content)) {
+            // MCP returns content as an array of typed content blocks (text, image, etc.)
+            const content = (toolResult.content as Array<Record<string, unknown>>)
+              .map((block) => block.text ?? JSON.stringify(block))
+              .join("\n");
+            if (toolResult.isError === true) {
+              throw new Error(`MCP tool "${gt.name}" failed: ${content || "The server returned an unspecified tool error."}`);
+            }
+            return content;
+          }
+
+          if (toolResult?.isError === true) {
+            throw new Error(`MCP tool "${gt.name}" failed: ${JSON.stringify(toolResult)}`);
+          }
+
+          return toolResult ?? rpcResult;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          onToolError(message);
+          throw error;
+        }
       },
     };
   }
@@ -191,12 +235,14 @@ export async function runAgent(userMessage: string, env: Env, accessToken: strin
 
   let generatedTools: GeneratedTool[];
   let sessionId: string | null = null;
+  let protocolVersion = "2025-03-26";
 
   try {
     // Keep the tools/list session ID for the later tools/call requests.
     // Creating a second session here caused calls to use a stale session.
     const mcpSession = await fetchMcpSession(env.MCP_SERVER_URL, accessToken);
     sessionId = mcpSession.sessionId;
+    protocolVersion = mcpSession.protocolVersion;
     generatedTools = mcpToolsToGenerated(mcpSession.tools);
     console.log(`Loaded ${generatedTools.length} tools from MCP server`);
   } catch (error) {
@@ -215,7 +261,15 @@ export async function runAgent(userMessage: string, env: Env, accessToken: strin
   const systemPrompt = buildSystemPrompt(apiDeclaration);
 
   // Step 3: Build ToolDescriptors and wrap them with aiTools() for the codemode library
-  const toolDescriptors = buildToolDescriptors(generatedTools, env.MCP_SERVER_URL, sessionId, accessToken);
+  const mcpToolErrors: string[] = [];
+  const toolDescriptors = buildToolDescriptors(
+    generatedTools,
+    env.MCP_SERVER_URL,
+    sessionId,
+    accessToken,
+    protocolVersion,
+    (message) => mcpToolErrors.push(message)
+  );
   const toolProvider = aiTools(toolDescriptors);
 
   // Step 4: Create the sandbox executor
@@ -246,9 +300,26 @@ export async function runAgent(userMessage: string, env: Env, accessToken: strin
     system: systemPrompt,
     messages: [{ role: "user", content: userMessage }],
     tools: { codemode: codemodeTool },
-    stopWhen: isStepCount(5),
+    stopWhen: [isStepCount(5), () => mcpToolErrors.length > 0],
     onError: (error) => console.error("streamText error:", error),
   });
 
-  return result.toTextStreamResponse();
+  // Do not let the model turn a real MCP failure into invented retry messages.
+  // Wait for the tool loop to finish, then return the exact failure to the UI.
+  let answer = "";
+  try {
+    answer = await result.text;
+  } catch (error) {
+    if (mcpToolErrors.length === 0) throw error;
+  }
+  if (mcpToolErrors.length > 0) {
+    return new Response(JSON.stringify({
+      error: "INDmoney data request failed",
+      details: mcpToolErrors[0],
+    }), { status: 502, headers: { "Content-Type": "application/json" } });
+  }
+
+  return new Response(answer, {
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
 }
