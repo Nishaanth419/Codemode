@@ -141,13 +141,28 @@ When the LLM writes code, `DynamicWorkerExecutor` spins up a fresh Dynamic Worke
 
 ## Deployment
 
+The app is served by one Cloudflare Worker: the same URL hosts the website, API, and installable PWA. No separate frontend hosting service is needed.
+
+> **Plan requirement:** This agent uses Cloudflare Dynamic Workers to run generated code. Dynamic Workers require Cloudflare's Workers Paid plan, which currently starts at $5/month; additional usage may be billed. See [Dynamic Workers pricing](https://developers.cloudflare.com/dynamic-workers/pricing/) before enabling billing.
+
 ```bash
-# Set the API key secret
+# Authenticate Wrangler with your Cloudflare account
+npx wrangler login
+
+# Store the OpenAI key as a Worker secret
 wrangler secret put OPENAI_API_KEY
 
-# Deploy to Cloudflare
+# Publish the website and API
 npm run deploy
 ```
+
+Wrangler prints the public `workers.dev` URL after deployment. Open that URL and choose **Connect INDmoney** to authorize the account. OAuth callback URLs are derived from the URL being used, so connect using the final public HTTPS hostname. You can attach a custom domain later under the Worker’s Domains & Routes settings.
+
+### Install the app
+
+The site is an installable Progressive Web App (PWA). On a supported browser, open the deployed HTTPS site and choose **Install app** (Chrome/Edge) or **Add to Home Screen** (iOS Safari). The cached shell can open offline; sign-in, portfolio data, and AI responses still require an internet connection.
+
+The PWA and website share the same Worker deployment and URL. Publishing native App Store or Google Play packages would require a separate native app project and store accounts.
 
 The deployment needs the `AuthSessionStore` Durable Object binding and migration declared in `wrangler.toml`. OAuth callback URLs use the current application origin, so use the deployed HTTPS URL when connecting in production.
 

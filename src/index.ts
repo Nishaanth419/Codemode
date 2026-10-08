@@ -15,6 +15,12 @@
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore -- HTML module type is resolved by wrangler at bundle time
 import FRONTEND_HTML from "./public/index.html";
+// @ts-ignore -- PWA files are served as text modules by Wrangler.
+import WEB_MANIFEST from "./public/manifest.webmanifest";
+// @ts-ignore -- PWA files are served as text modules by Wrangler.
+import SERVICE_WORKER from "./public/sw.js";
+// @ts-ignore -- PWA files are served as text modules by Wrangler.
+import APP_ICON from "./public/icon.svg";
 
 
 import { runAgent, type Env } from "./agent";
@@ -231,6 +237,22 @@ export default {
     }
 
     try {
+      if (request.method === "GET" && url.pathname === "/manifest.webmanifest") {
+        return new Response(WEB_MANIFEST as string, {
+          headers: { "Content-Type": "application/manifest+json", "Cache-Control": "public, max-age=3600" },
+        });
+      }
+      if (request.method === "GET" && url.pathname === "/sw.js") {
+        return new Response(SERVICE_WORKER as string, {
+          headers: { "Content-Type": "application/javascript; charset=UTF-8", "Cache-Control": "no-cache", "Service-Worker-Allowed": "/" },
+        });
+      }
+      if (request.method === "GET" && url.pathname === "/icon.svg") {
+        return new Response(APP_ICON as string, {
+          headers: { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" },
+        });
+      }
+
       if (url.pathname === "/auth/indmoney/connect" && request.method === "GET") {
         return await connectToIndMoney(request, env);
       }

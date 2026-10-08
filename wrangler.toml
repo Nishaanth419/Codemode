@@ -5,7 +5,7 @@ compatibility_date = "2026-09-25"
 # Treat .html files as plain-text modules so they can be imported as strings
 [[rules]]
 type = "Text"
-globs = ["**/*.html"]
+globs = ["**/*.html", "**/*.webmanifest", "**/sw.js", "**/*.svg"]
 fallthrough = false
 
 # Worker Loader binding — enables spinning up Dynamic Workers at runtime.
