@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Code Mode agent for INDmoney MCP, hosted on Firebase and Cloud Run with isolated generated-code execution",
+  "description": "INDmoney MCP agent with direct tool calling, hosted on Firebase and Cloud Run",
   "scripts": {
     "dev": "node --env-file=.env --import tsx src/index.ts",
     "start": "node --import tsx src/index.ts",

@@ -1,15 +1,8 @@
 /**
- * mcp-to-ts.ts — MCP Schema Fetcher and TypeScript Codegen
+ * mcp-to-ts.ts — MCP schema fetcher and tool descriptor conversion
  *
- * Connects to an MCP server over SSE (Streamable HTTP), fetches tool schemas,
- * and generates TypeScript interface definitions with JSDoc comments. These
- * type definitions are injected into the LLM's system prompt so it can write
- * correctly-typed code that calls the generated API.
- *
- * Why codegen instead of raw JSON schemas?
- * - LLMs are trained on TypeScript and produce better code with typed APIs
- * - JSDoc comments give the LLM parameter-level documentation
- * - The LLM never sees the underlying MCP protocol — just clean function signatures
+ * Connects to an MCP server over Streamable HTTP, fetches tool schemas, and
+ * converts those schemas to Zod for direct model tool calling.
  */
 
 import { z } from "zod";
@@ -40,15 +33,13 @@ interface McpToolDefinition {
   };
 }
 
-/** The shape we emit for each tool — ready for both codegen and AI SDK tool() */
+/** Tool descriptor used to create an AI SDK tool. */
 export interface GeneratedTool {
   name: string;
   description: string;
   parameters: z.ZodTypeAny;
   /** TypeScript declaration string, e.g. `(query: string, limit?: number) => Promise<unknown>` */
   tsSignature: string;
-  /** Full JSDoc block for the function */
-  jsDoc: string;
 }
 
 // ─── MCP Client (Streamable HTTP) ──────────────────────────────────────────
@@ -312,34 +303,6 @@ function jsonSchemaTypeToTs(prop: JsonSchemaProperty): string {
 }
 
 /**
- * Generate the JSDoc block for a tool function.
- */
-function generateJsDoc(tool: McpToolDefinition): string {
-  const lines: string[] = ["/**"];
-
-  if (tool.description) {
-    // Wrap long descriptions
-    const desc = tool.description.replace(/\n/g, "\n * ");
-    lines.push(` * ${desc}`);
-  }
-
-  if (tool.inputSchema.properties) {
-    lines.push(" *");
-    for (const [paramName, prop] of Object.entries(tool.inputSchema.properties)) {
-      const optional = !(tool.inputSchema.required ?? []).includes(paramName);
-      const desc = prop.description ? ` — ${prop.description}` : "";
-      const optTag = optional ? " [optional]" : "";
-      lines.push(` * @param ${paramName}${optTag}${desc}`);
-    }
-  }
-
-  lines.push(" * @returns Promise<unknown>");
-  lines.push(" */");
-
-  return lines.join("\n");
-}
-
-/**
  * Generate a TypeScript function signature for a tool.
  *
  * Example output:
@@ -366,8 +329,7 @@ function generateTsSignature(tool: McpToolDefinition): string {
 // ─── Public API ────────────────────────────────────────────────────────────
 
 /**
- * Convert MCP tool definitions into GeneratedTool objects with Zod schemas
- * and TypeScript type declarations.
+ * Convert MCP tool definitions into descriptors with Zod input schemas.
  */
 export function mcpToolsToGenerated(mcpTools: McpToolDefinition[]): GeneratedTool[] {
   return mcpTools.map((tool) => ({
@@ -377,39 +339,5 @@ export function mcpToolsToGenerated(mcpTools: McpToolDefinition[]): GeneratedToo
       ? jsonSchemaToZodObject(tool.inputSchema.properties, tool.inputSchema.required ?? [])
       : z.object({}),
     tsSignature: generateTsSignature(tool),
-    jsDoc: generateJsDoc(tool),
   }));
-}
-
-/**
- * Generate a complete TypeScript API declaration string from generated tools.
- * This is what gets injected into the LLM's system prompt.
- *
- * Example output:
- * ```typescript
- * interface CodemodeAPI {
- *   /** Search documentation
- *    * @param query — The search query
- *    * @returns Promise<unknown>
- *    *\/
- *   search(query: string): Promise<unknown>;
- * }
- *
- * declare const codemode: CodemodeAPI;
- * ```
- */
-export function generateApiDeclaration(tools: GeneratedTool[]): string {
-  const methods = tools
-    .map((tool) => {
-      const sig = tool.tsSignature;
-      // Convert arrow function sig to method sig: (params) => Return -> methodName(params): Return
-      const match = sig.match(/^\(([^)]*)\)\s*=>\s*(.+)$/);
-      if (!match) return "";
-
-      const [, params, returnType] = match;
-      return `${tool.jsDoc}\n  ${tool.name}(${params}): ${returnType};`;
-    })
-    .join("\n\n");
-
-  return `interface CodemodeAPI {\n${methods}\n}\n\ndeclare const codemode: CodemodeAPI;`;
 }

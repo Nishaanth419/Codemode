@@ -1,34 +1,15 @@
 /**
- * agent.ts — Code Mode Agent Loop
- *
- * Implements the Code Mode pattern with isolated generated-code execution:
- * Instead of exposing N individual tools to the LLM, we expose a single
- * "execute code" tool. The LLM writes TypeScript that calls a typed API,
- * and that code runs in an isolated Cloud Run sandbox.
- *
- * Flow:
- * 1. On startup, fetch tool schemas from the configured MCP server
- * 2. Convert schemas to TypeScript declarations and ToolDescriptors
- * 3. Expose one "codemode" tool backed by a Cloud Run sandbox executor
- * 4. Pass user message + system prompt (with API types) to the LLM via streamText
- * 5. LLM writes code → isolated sandbox runs it → result returned to LLM
- * 6. LLM uses the result to respond to the user (or writes more code)
- *
- * Why this is better than raw MCP tool calls:
- * - Up to 80% fewer tokens (the LLM can loop/filter in code, not in prompts)
- * - Better results (procedural logic > chain-of-thought for data processing)
- * - Single round-trip for multi-tool workflows
+ * Agent loop that exposes each INDmoney MCP tool directly to the model.
+ * Tool schemas are discovered for each request and converted to AI SDK tools;
+ * calls are proxied to MCP using the user's OAuth session.
  */
 
-import { streamText, isStepCount, tool } from "ai";
+import { isStepCount, streamText, tool } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { z } from "zod";
-import { CloudRunSandboxExecutor } from "./sandbox-worker";
-
 import {
   fetchMcpSession,
   mcpToolsToGenerated,
-  generateApiDeclaration,
   type GeneratedTool,
 } from "./mcp-to-ts";
 
@@ -44,79 +25,6 @@ type ToolDescriptors = Record<string, {
   execute: (args: unknown) => Promise<unknown>;
 }>;
 
-/**
- * Build the system prompt that teaches the LLM about the Code Mode pattern.
- *
- * The prompt includes the full TypeScript API declaration generated from
- * MCP tool schemas, so the LLM knows exactly what methods are available.
- */
-function buildSystemPrompt(apiDeclaration: string): string {
-  return `You are a helpful assistant that uses Code Mode to accomplish tasks.
-
-## How Code Mode Works
-
-Instead of calling tools individually, you write JavaScript code that orchestrates
-calls to a typed API. Your code runs in a sandboxed environment — the only way to
-interact with external services is through the \`codemode\` object.
-
-When you need to perform actions, use the \`codemode\` tool and write JavaScript code.
-The \`codemode\` object is available as a global in your sandbox.
-
-## Available API
-
-The following TypeScript declarations describe the API available to your code:
-
-\`\`\`typescript
-${apiDeclaration}
-\`\`\`
-
-## Guidelines
-
-1. **Write async code** — All codemode methods return Promises. Use \`await\`.
-2. **Process data in code** — Filter, map, and transform in code. This saves tokens.
-3. **Combine multiple calls** — Call multiple API methods in one snippet. Much more
-   efficient than separate tool invocations.
-4. **Return results** — Return the final value explicitly with `return`.
-5. **Use console.log** — Output is captured and returned to you for debugging.
-6. **Handle errors** — Use try/catch for operations that might fail.
-7. **No network access** — \`fetch()\` is blocked. Use the \`codemode\` API only.
-8. **Report tool failures clearly** — If an MCP call fails, tell the user the tool's
-   exact error and what to try next. Do not claim you fetched data or say you are
-   troubleshooting further unless another tool call succeeds. Make one attempt per
-   tool call; do not retry, switch tools speculatively, or emit progress messages.
-9. **Visualize data proactively** — When tool results contain comparable numeric
-   data (such as portfolio holdings, allocations, balances over time, or category
-   totals), include a chart in your answer without asking the user which chart they
-   want. Put one chart in a \`chart\` fenced block using valid JSON:
-   {"type":"bar","title":"Current value by holding","unit":"₹","data":[{"label":"Fund A","value":125000}]}
-   Use \`bar\` for comparing categories and \`donut\` for a part-to-whole split.
-   Keep the chart to relevant top items (usually 5–10), and explain the largest
-   concentration in the surrounding text. Only chart values returned by tools;
-   never invent data. If the tool call fails or provides no numeric data, explain
-   that clearly and do not fabricate a chart. Do not ask the user to choose a
-   visualization when the data supports a sensible default.
-
-## Example
-
-If asked to search for information, write:
-
-\`\`\`javascript
-async () => {
-  const results = await codemode.search({ query: "portfolio" });
-  console.log("Found", results.length, "results");
-  return results;
-}
-\`\`\`
-`;
-}
-
-/**
- * Convert generated MCP tools into descriptors with an inputSchema (Zod),
- * and an execute function that proxies the call to the MCP server.
- *
- * We use ToolDescriptors (not AI SDK tool()) because it maps directly to the
- * codemode library's native format and avoids inference issues with dynamic schemas.
- */
 function buildToolDescriptors(
   generatedTools: GeneratedTool[],
   mcpServerUrl: string,
@@ -127,24 +35,19 @@ function buildToolDescriptors(
 ): ToolDescriptors {
   const descriptors: ToolDescriptors = {};
 
-  for (const gt of generatedTools) {
-    descriptors[gt.name] = {
-      description: gt.description,
-      inputSchema: gt.parameters as z.ZodType,
+  for (const generatedTool of generatedTools) {
+    descriptors[generatedTool.name] = {
+      description: generatedTool.description,
+      inputSchema: generatedTool.parameters,
       execute: async (args: unknown) => {
         try {
-          // Forward the tool call to the MCP server via JSON-RPC
           const headers: Record<string, string> = {
             "Content-Type": "application/json",
             Accept: "application/json, text/event-stream",
             Authorization: `Bearer ${accessToken}`,
             "MCP-Protocol-Version": protocolVersion,
-            "Mcp-Method": "tools/call",
-            "Mcp-Name": gt.name,
           };
-          if (sessionId) {
-            headers["mcp-session-id"] = sessionId;
-          }
+          if (sessionId) headers["mcp-session-id"] = sessionId;
 
           const response = await fetch(mcpServerUrl, {
             method: "POST",
@@ -153,62 +56,59 @@ function buildToolDescriptors(
               jsonrpc: "2.0",
               id: Date.now(),
               method: "tools/call",
-              params: { name: gt.name, arguments: args },
+              params: { name: generatedTool.name, arguments: args },
             }),
           });
 
           if (!response.ok) {
             const responseBody = (await response.text()).slice(0, 500);
             throw new Error(
-              `MCP tools/call failed for "${gt.name}": ${response.status} ${response.statusText}` +
+              `MCP tools/call failed for "${generatedTool.name}": ${response.status} ${response.statusText}` +
               (responseBody ? `. Response: ${responseBody}` : "")
             );
           }
 
-          // Parse response (may be JSON or SSE stream)
           const contentType = response.headers.get("content-type") ?? "";
           let rpcResult: Record<string, unknown> | null = null;
-
           if (contentType.includes("text/event-stream")) {
             const text = await response.text();
             for (const line of text.split("\n")) {
-              if (line.startsWith("data: ")) {
-                const data = line.slice(6).trim();
-                if (data && data !== "[DONE]") {
-                  rpcResult = JSON.parse(data) as Record<string, unknown>;
-                  break;
-                }
+              if (!line.startsWith("data: ")) continue;
+              const data = line.slice(6).trim();
+              if (data && data !== "[DONE]") {
+                rpcResult = JSON.parse(data) as Record<string, unknown>;
+                break;
               }
             }
           } else {
-            rpcResult = (await response.json()) as Record<string, unknown>;
+            rpcResult = await response.json() as Record<string, unknown>;
           }
 
-          // Extract the tool result content from the MCP response envelope
           const rpcError = rpcResult?.error as Record<string, unknown> | undefined;
           if (rpcError) {
-            const errorMessage = typeof rpcError.message === "string"
-              ? rpcError.message
-              : JSON.stringify(rpcError);
-            throw new Error(`MCP tools/call error for "${gt.name}": ${errorMessage}`);
+            const message = typeof rpcError.message === "string" ? rpcError.message : JSON.stringify(rpcError);
+            throw new Error(`MCP tools/call error for "${generatedTool.name}": ${message}`);
           }
 
           const toolResult = rpcResult?.result as Record<string, unknown> | undefined;
-          if (toolResult?.content && Array.isArray(toolResult.content)) {
-            // MCP returns content as an array of typed content blocks (text, image, etc.)
-            const content = (toolResult.content as Array<Record<string, unknown>>)
-              .map((block) => block.text ?? JSON.stringify(block))
-              .join("\n");
-            if (toolResult.isError === true) {
-              throw new Error(`MCP tool "${gt.name}" failed: ${content || "The server returned an unspecified tool error."}`);
-            }
-            return content;
-          }
-
           if (toolResult?.isError === true) {
-            throw new Error(`MCP tool "${gt.name}" failed: ${JSON.stringify(toolResult)}`);
+            const content = Array.isArray(toolResult.content)
+              ? toolResult.content.map((block) => {
+                const item = block as Record<string, unknown>;
+                return item.text ?? JSON.stringify(item);
+              }).join("\n")
+              : JSON.stringify(toolResult);
+            throw new Error(`MCP tool "${generatedTool.name}" failed: ${content}`);
           }
 
+          // Return text blocks as readable text and preserve structured content
+          // where the MCP server provides it.
+          if (Array.isArray(toolResult?.content)) {
+            return toolResult.content.map((block) => {
+              const item = block as Record<string, unknown>;
+              return item.text ?? JSON.stringify(item);
+            }).join("\n");
+          }
           return toolResult ?? rpcResult;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -222,27 +122,26 @@ function buildToolDescriptors(
   return descriptors;
 }
 
-/**
- * Run the Code Mode agent loop.
- *
- * Takes a user message, connects to the MCP server, generates the typed API,
- * and streams the LLM response back as a text stream.
- *
- * @param userMessage - The user's input message
- * @param env - Worker environment bindings
- * @returns A streaming Response
- */
+function buildSystemPrompt(): string {
+  return `You are a helpful assistant that answers questions using the available INDmoney MCP tools.
+
+Call the relevant tools directly when the user asks about their account. Use only the data returned by tools; never invent holdings, balances, transactions, or performance. If a tool fails, report its exact error and do not claim that data was retrieved or retry speculatively.
+
+When tool results contain comparable numeric data (such as holdings, allocations, balances over time, or category totals), proactively include one chart in a \`chart\` fenced block using valid JSON, for example:
+\`\`\`chart
+{"type":"bar","title":"Current value by holding","unit":"₹","data":[{"label":"Fund A","value":125000}]}
+\`\`\`
+Use \`bar\` to compare categories and \`donut\` for a part-to-whole split. Include only relevant items (usually 5–10), explain the largest concentration in the surrounding text, and chart only values returned by the tools. If a tool fails or provides no numeric data, explain that clearly and do not fabricate a chart.`;
+}
+
+/** Run one chat turn and return the assistant's response as plain text. */
 export async function runAgent(userMessage: string, env: Env, accessToken: string): Promise<Response> {
-  // Step 1: Connect to the MCP server and fetch tool schemas
   console.log(`Connecting to MCP server: ${env.MCP_SERVER_URL}`);
 
   let generatedTools: GeneratedTool[];
   let sessionId: string | null = null;
   let protocolVersion = "2025-03-26";
-
   try {
-    // Keep the tools/list session ID for the later tools/call requests.
-    // Creating a second session here caused calls to use a stale session.
     const mcpSession = await fetchMcpSession(env.MCP_SERVER_URL, accessToken);
     sessionId = mcpSession.sessionId;
     protocolVersion = mcpSession.protocolVersion;
@@ -250,22 +149,14 @@ export async function runAgent(userMessage: string, env: Env, accessToken: strin
     console.log(`Loaded ${generatedTools.length} tools from MCP server`);
   } catch (error) {
     console.error("Failed to connect to MCP server:", error);
-    return new Response(
-      JSON.stringify({
-        error: "Failed to connect to MCP server",
-        details: error instanceof Error ? error.message : String(error),
-      }),
-      { status: 502, headers: { "Content-Type": "application/json" } }
-    );
+    return new Response(JSON.stringify({
+      error: "Failed to connect to MCP server",
+      details: error instanceof Error ? error.message : String(error),
+    }), { status: 502, headers: { "Content-Type": "application/json" } });
   }
 
-  // Step 2: Generate TypeScript API declaration for injection into the system prompt
-  const apiDeclaration = generateApiDeclaration(generatedTools);
-  const systemPrompt = buildSystemPrompt(apiDeclaration);
-
-  // Step 3: Build the host-side MCP functions that the sandbox may invoke.
   const mcpToolErrors: string[] = [];
-  const toolDescriptors = buildToolDescriptors(
+  const descriptors = buildToolDescriptors(
     generatedTools,
     env.MCP_SERVER_URL,
     sessionId,
@@ -273,36 +164,22 @@ export async function runAgent(userMessage: string, env: Env, accessToken: strin
     protocolVersion,
     (message) => mcpToolErrors.push(message)
   );
-  // Step 4: Create the isolated Cloud Run sandbox executor and expose a single
-  // code tool to the model, keeping MCP credentials in the parent service.
-  const executor = new CloudRunSandboxExecutor();
-  const codemodeTool = tool({
-    description: `Execute JavaScript to achieve the user's goal. It runs in an isolated sandbox with no outbound network access. The only external operations are these typed MCP functions:\n\n${apiDeclaration}\n\nWrite an async arrow function and return the result, for example: async () => { const holdings = await codemode.getHoldings({}); return holdings; }`,
-    inputSchema: z.object({ code: z.string().describe("JavaScript async arrow function to execute") }),
-    execute: async ({ code }) => {
-      const result = await executor.execute(code, [{
-        name: "codemode",
-        fns: Object.fromEntries(Object.entries(toolDescriptors).map(([name, descriptor]) => [name, descriptor.execute])),
-      }]);
-      if (result.error) throw new Error(result.error);
-      return result.logs?.length ? { result: result.result, logs: result.logs } : { result: result.result };
-    },
-  });
+  const modelTools = Object.fromEntries(Object.entries(descriptors).map(([name, descriptor]) => [name, tool({
+    description: descriptor.description,
+    inputSchema: descriptor.inputSchema,
+    execute: descriptor.execute,
+  })]));
 
-  // Step 6: Call the LLM via Vercel AI SDK streamText
   const openai = createOpenAI({ apiKey: env.OPENAI_API_KEY });
-
   const result = streamText({
     model: openai("gpt-4o"),
-    system: systemPrompt,
+    system: buildSystemPrompt(),
     messages: [{ role: "user", content: userMessage }],
-    tools: { codemode: codemodeTool },
+    tools: modelTools,
     stopWhen: [isStepCount(5), () => mcpToolErrors.length > 0],
     onError: (error) => console.error("streamText error:", error),
   });
 
-  // Do not let the model turn a real MCP failure into invented retry messages.
-  // Wait for the tool loop to finish, then return the exact failure to the UI.
   let answer = "";
   try {
     answer = await result.text;
@@ -316,7 +193,5 @@ export async function runAgent(userMessage: string, env: Env, accessToken: strin
     }), { status: 502, headers: { "Content-Type": "application/json" } });
   }
 
-  return new Response(answer, {
-    headers: { "Content-Type": "text/plain; charset=utf-8" },
-  });
+  return new Response(answer, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
 }

@@ -1,15 +1,15 @@
 # Code Mode Agent
 
-An AI agent that connects to INDmoney's MCP server, generates JavaScript to process the returned portfolio data, and runs that code in an isolated Cloud Run sandbox. The website is an installable Progressive Web App (PWA).
+An AI agent that connects to INDmoney's MCP server and exposes its tools directly to the model. The website is an installable Progressive Web App (PWA).
 
 ## Hosting layout
 
 - **Firebase Hosting** serves the website, PWA manifest, service worker, and icon.
-- **Cloud Run** handles INDmoney OAuth, MCP requests, OpenAI requests, and sandboxed code execution.
+- **Cloud Run** handles INDmoney OAuth, MCP requests, and OpenAI requests.
 - **Cloud Firestore** stores short-lived per-browser OAuth sessions and refresh tokens.
 - Hosting rewrites `/api/**` and `/auth/**` to the Cloud Run service so the site and API share one origin. That keeps OAuth cookies same-site.
 
-Generated code runs with Google's Cloud Run sandbox launcher. The sandbox has no outbound network access; its only host capability is a read-only-mounted local socket that forwards approved MCP tool calls. OpenAI keys and OAuth tokens stay in the Cloud Run service. Cloud Run sandboxes are currently a Preview feature and require a billing-enabled Google Cloud project. See [Cloud Run code execution](https://docs.cloud.google.com/run/docs/code-execution), [Cloud Run sandbox configuration](https://docs.cloud.google.com/run/docs/configuring/services/sandboxes), and [Firebase Hosting rewrites to Cloud Run](https://firebase.google.com/docs/hosting/cloud-run).
+The agent discovers MCP tool schemas at request time, exposes each tool directly to the model, and proxies tool calls with the signed-in user's OAuth token. OpenAI keys and OAuth tokens stay in the Cloud Run service. See [Firebase Hosting rewrites to Cloud Run](https://firebase.google.com/docs/hosting/cloud-run).
 
 ## Prerequisites
 
@@ -34,11 +34,11 @@ gcloud config set project YOUR_FIREBASE_PROJECT_ID
 npm run dev
 ```
 
-The web app is available at `http://localhost:8080`. A local machine does not have the Cloud Run sandbox launcher, so code execution requires deploying the backend to Cloud Run with sandbox launching enabled.
+The web app is available at `http://localhost:8080`. Sign in to INDmoney in the app before asking questions about account data.
 
 ## Deploy to Firebase and Cloud Run
 
-1. Select your Firebase project and enable billing. Cloud Run sandbox support also requires billing and the second-generation Cloud Run environment.
+1. Select your Firebase project and enable billing for Cloud Run and Firestore usage.
 
 2. Create the Firestore database in the same region as the backend:
 
@@ -61,15 +61,13 @@ The web app is available at `http://localhost:8080`. A local machine does not ha
 
 4. Create a `.firebaserc` from `.firebaserc.example`, replacing the placeholder with your project ID. Set `APP_ORIGIN` to `https://YOUR_FIREBASE_PROJECT_ID.web.app`.
 
-5. Deploy the backend with the sandbox launcher enabled. This app uses region `asia-south1` and service name `codemode-api`, matching `firebase.json`:
+5. Deploy the backend. This app uses region `asia-south1` and service name `codemode-api`, matching `firebase.json`:
 
    ```bash
    gcloud beta run deploy codemode-api \
      --source . \
      --region asia-south1 \
-     --sandbox-launcher \
      --allow-unauthenticated \
-     --memory 2Gi \
      --concurrency 2 \
      --max 3 \
      --set-secrets OPENAI_API_KEY=OPENAI_API_KEY:latest \
@@ -86,7 +84,7 @@ The web app is available at `http://localhost:8080`. A local machine does not ha
 
 7. Open the Firebase Hosting URL and choose **Connect INDmoney**. OAuth callback URLs use that origin, so finish authorization on the same `web.app` or custom domain you will use for the app.
 
-Set a budget alert in Google Cloud before sharing the app. Cloud Run sandboxes use the service's allocated CPU and memory, and Google Cloud services require a billing account even when usage fits within a no-cost quota.
+Set a budget alert in Google Cloud before sharing the app. Google Cloud services require a billing account even when usage fits within a no-cost quota.
 
 ## Install the app
 
@@ -103,7 +101,6 @@ src/
   index.ts             Express API, INDmoney OAuth, Firestore session storage
   agent.ts             AI loop and MCP tool proxy
   mcp-to-ts.ts         MCP schema fetcher and TypeScript API generator
-  sandbox-worker.ts    Cloud Run sandbox executor and restricted MCP socket bridge
   public/              Firebase Hosting website and PWA assets
 firebase.json          Static hosting and same-origin Cloud Run rewrites
 Dockerfile             Cloud Run container

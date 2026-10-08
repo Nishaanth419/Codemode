@@ -1,7 +1,7 @@
 import express from "express";
 import { Firestore } from "@google-cloud/firestore";
 import { runAgent, type Env } from "./agent";
-import { fetchMcpSession, mcpToolsToGenerated, generateApiDeclaration } from "./mcp-to-ts";
+import { fetchMcpSession, mcpToolsToGenerated } from "./mcp-to-ts";
 
 interface OAuthSession {
   state?: string;
@@ -269,7 +269,6 @@ app.get("/api/tools", async (request, response, next) => {
       connected: true,
       toolCount: generated.length,
       tools: generated.map((item) => ({ name: item.name, description: item.description, tsSignature: item.tsSignature })),
-      apiDeclaration: generateApiDeclaration(generated),
     });
   } catch (error) { next(error); }
 });

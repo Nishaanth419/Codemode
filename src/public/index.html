@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Code Mode Agent</title>
-  <meta name="description" content="An AI agent that writes and executes code to answer your questions using INDmoney MCP tools in an isolated Cloud Run sandbox." />
+  <meta name="description" content="An AI assistant that answers your questions using INDmoney MCP tools." />
   <meta name="theme-color" content="#0a0c14" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -692,7 +692,7 @@
   <div class="logo-mark">⌘</div>
   <div>
     <div class="logo-text">Code Mode</div>
-      <div class="logo-sub">MCP → TypeScript → Sandboxed Code</div>
+      <div class="logo-sub">Direct INDmoney MCP tools</div>
   </div>
   <div class="topbar-spacer"></div>
   <button id="auth-button" class="auth-button" type="button">Connect INDmoney</button>
@@ -732,8 +732,7 @@
       <div>
         <div class="empty-title">Code Mode Agent</div>
         <div class="empty-sub" style="margin-top:8px">
-          The agent writes JavaScript that calls a typed MCP API, then executes it
-          in an isolated Cloud Run sandbox — no direct tool calls, no context bloat.
+          The agent calls INDmoney MCP tools directly to answer questions about your portfolio.
         </div>
       </div>
       <div class="example-prompts">
@@ -870,7 +869,7 @@ function renderTools() {
 /* ── Tool detail tooltip ─────────────────────────────────────────────── */
 function showToolDetail(tool, e) {
   document.getElementById('td-name').textContent = tool.name;
-  document.getElementById('td-sig').textContent = `codemode.${tool.name}${tool.tsSignature || '()'}`;
+  document.getElementById('td-sig').textContent = `${tool.name}${tool.tsSignature || '()'}`;
   document.getElementById('td-desc').textContent = tool.description || '';
 
   const rect = e.target.getBoundingClientRect();
@@ -1063,7 +1062,7 @@ function renderMarkdown(text) {
       <div class="code-block">
         <div class="code-block-header">
           <span class="lang-badge">${esc(lang || 'code')}</span>
-          Generated Code
+          Code snippet
           <button class="copy-btn" id="${btnId}" onclick="copyCode(this, ${JSON.stringify(code)})">Copy</button>
         </div>
         <pre>${highlighted}</pre>
