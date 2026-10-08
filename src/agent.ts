@@ -106,7 +106,8 @@ function buildToolDescriptors(
   generatedTools: GeneratedTool[],
   mcpServerUrl: string,
   sessionId: string | null,
-  accessToken: string
+  accessToken: string,
+  protocolVersion: string
 ): ToolDescriptors {
   const descriptors: ToolDescriptors = {};
 
@@ -120,6 +121,9 @@ function buildToolDescriptors(
           "Content-Type": "application/json",
           Accept: "application/json, text/event-stream",
           Authorization: `Bearer ${accessToken}`,
+          "MCP-Protocol-Version": protocolVersion,
+          "Mcp-Method": "tools/call",
+          "Mcp-Name": gt.name,
         };
         if (sessionId) {
           headers["mcp-session-id"] = sessionId;
@@ -210,12 +214,14 @@ export async function runAgent(userMessage: string, env: Env, accessToken: strin
 
   let generatedTools: GeneratedTool[];
   let sessionId: string | null = null;
+  let protocolVersion = "2025-03-26";
 
   try {
     // Keep the tools/list session ID for the later tools/call requests.
     // Creating a second session here caused calls to use a stale session.
     const mcpSession = await fetchMcpSession(env.MCP_SERVER_URL, accessToken);
     sessionId = mcpSession.sessionId;
+    protocolVersion = mcpSession.protocolVersion;
     generatedTools = mcpToolsToGenerated(mcpSession.tools);
     console.log(`Loaded ${generatedTools.length} tools from MCP server`);
   } catch (error) {
@@ -234,7 +240,7 @@ export async function runAgent(userMessage: string, env: Env, accessToken: strin
   const systemPrompt = buildSystemPrompt(apiDeclaration);
 
   // Step 3: Build ToolDescriptors and wrap them with aiTools() for the codemode library
-  const toolDescriptors = buildToolDescriptors(generatedTools, env.MCP_SERVER_URL, sessionId, accessToken);
+  const toolDescriptors = buildToolDescriptors(generatedTools, env.MCP_SERVER_URL, sessionId, accessToken, protocolVersion);
   const toolProvider = aiTools(toolDescriptors);
 
   // Step 4: Create the sandbox executor

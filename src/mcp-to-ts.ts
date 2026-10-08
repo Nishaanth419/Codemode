@@ -40,6 +40,8 @@ interface McpToolDefinition {
   };
 }
 
+const MCP_PROTOCOL_VERSION = "2025-03-26";
+
 /** The shape we emit for each tool — ready for both codegen and AI SDK tool() */
 export interface GeneratedTool {
   name: string;
@@ -65,6 +67,7 @@ export interface GeneratedTool {
 export async function fetchMcpSession(serverUrl: string, accessToken?: string): Promise<{
   tools: McpToolDefinition[];
   sessionId: string | null;
+  protocolVersion: string;
 }> {
   // Step 1: Initialize the MCP session
   const authHeaders: Record<string, string> = accessToken
@@ -82,7 +85,7 @@ export async function fetchMcpSession(serverUrl: string, accessToken?: string): 
       id: 1,
       method: "initialize",
       params: {
-        protocolVersion: "2025-03-26",
+        protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
         clientInfo: { name: "code-mode-agent", version: "1.0.0" },
       },
@@ -112,11 +115,17 @@ export async function fetchMcpSession(serverUrl: string, accessToken?: string): 
   if (!initResult?.result) {
     throw new Error(`MCP initialize returned unexpected result: ${JSON.stringify(initResult)}`);
   }
+  const initializeResult = initResult.result as Record<string, unknown>;
+  const protocolVersion = typeof initializeResult.protocolVersion === "string"
+    ? initializeResult.protocolVersion
+    : MCP_PROTOCOL_VERSION;
 
   // Step 2: Send initialized notification
   const notifyHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
+    "MCP-Protocol-Version": protocolVersion,
+    "Mcp-Method": "notifications/initialized",
   };
   Object.assign(notifyHeaders, authHeaders);
   if (sessionId) {
@@ -136,6 +145,8 @@ export async function fetchMcpSession(serverUrl: string, accessToken?: string): 
   const toolsHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
+    "MCP-Protocol-Version": protocolVersion,
+    "Mcp-Method": "tools/list",
   };
   Object.assign(toolsHeaders, authHeaders);
   if (sessionId) {
@@ -169,7 +180,7 @@ export async function fetchMcpSession(serverUrl: string, accessToken?: string): 
     throw new Error(`MCP tools/list returned unexpected result: ${JSON.stringify(toolsResult)}`);
   }
 
-  return { tools: tools as McpToolDefinition[], sessionId };
+  return { tools: tools as McpToolDefinition[], sessionId, protocolVersion };
 }
 
 /** Convenience wrapper for callers that only need the tool definitions. */
