@@ -4,7 +4,13 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Code Mode Agent</title>
-  <meta name="description" content="An AI agent that writes and executes code to answer your questions using MCP tools in a sandboxed Cloudflare Worker." />
+  <meta name="description" content="An AI agent that writes and executes code to answer your questions using INDmoney MCP tools in an isolated Cloud Run sandbox." />
+  <meta name="theme-color" content="#0a0c14" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -669,6 +675,10 @@
 
     /* ── Responsive ──────────────────────────────────────────────── */
     @media (max-width: 700px) {
+      #topbar { padding: 0 12px; gap: 8px; }
+      .logo-sub { display: none; }
+      #status-badge { padding: 4px 7px; font-size: 11px; }
+      .auth-button { padding: 6px 8px; font-size: 10px; }
       #sidebar { display: none; }
       .message { padding: 0 16px; }
       #input-area { padding: 12px 16px 16px; }
@@ -682,9 +692,10 @@
   <div class="logo-mark">⌘</div>
   <div>
     <div class="logo-text">Code Mode</div>
-    <div class="logo-sub">MCP → TypeScript → Sandboxed Worker</div>
+      <div class="logo-sub">MCP → TypeScript → Sandboxed Code</div>
   </div>
   <div class="topbar-spacer"></div>
+  <button id="auth-button" class="auth-button" type="button">Connect INDmoney</button>
   <div id="status-badge">
     <div class="status-dot" id="status-dot"></div>
     <span id="status-text">Connecting…</span>
@@ -699,7 +710,6 @@
     <div class="sidebar-header">
       <span class="sidebar-title">MCP Tools</span>
       <span id="tool-count" style="display:none"></span>
-      <button id="auth-button" class="auth-button" type="button">Connect INDmoney</button>
     </div>
     <div id="mcp-server-tag">
       <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
@@ -723,7 +733,7 @@
         <div class="empty-title">Code Mode Agent</div>
         <div class="empty-sub" style="margin-top:8px">
           The agent writes JavaScript that calls a typed MCP API, then executes it
-          in a sandboxed Cloudflare Worker — no direct tool calls, no context bloat.
+          in an isolated Cloud Run sandbox — no direct tool calls, no context bloat.
         </div>
       </div>
       <div class="example-prompts">
@@ -764,6 +774,12 @@
 /* ── State ─────────────────────────────────────────────────────────── */
 let tools = [];
 let isStreaming = false;
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch((error) => {
+    console.warn('The app shell could not be cached for offline use:', error);
+  }));
+}
 
 /* ── DOM refs ──────────────────────────────────────────────────────── */
 const statusDot  = document.getElementById('status-dot');

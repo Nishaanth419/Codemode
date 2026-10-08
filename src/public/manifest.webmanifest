@@ -1,0 +1,20 @@
+{
+  "id": "/",
+  "name": "Code Mode Agent",
+  "short_name": "Code Mode",
+  "description": "Ask questions about your INDmoney portfolio and explore the answers with visualizations.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0a0c14",
+  "theme_color": "#0a0c14",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

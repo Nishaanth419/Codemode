@@ -2,15 +2,14 @@ FROM node:22-slim
 
 WORKDIR /app
 
-# Copy package.json and install dependencies
-COPY package.json package-lock.json* ./
-RUN npm install
+# Cloud Run's sandbox launcher uses the container's Node runtime to execute
+# generated code in isolated, temporary sandboxes.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
-# Copy the rest of the application
-COPY . .
+COPY src ./src
 
-# Expose the Wrangler dev server port
-EXPOSE 8787
+ENV NODE_ENV=production
+EXPOSE 8080
 
-# Run the dev server
-CMD ["npm", "run", "dev"]
+CMD ["npm", "start"]

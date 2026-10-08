@@ -2,3 +2,9 @@ node_modules/
 dist/
 .wrangler/
 .env
+.firebaserc
+.firebase/
+firebase-debug.log
+ui-debug.log
+*.jks
+*.keystore

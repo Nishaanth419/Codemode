@@ -65,6 +65,7 @@ export interface GeneratedTool {
 export async function fetchMcpSession(serverUrl: string, accessToken?: string): Promise<{
   tools: McpToolDefinition[];
   sessionId: string | null;
+  protocolVersion: string;
 }> {
   // Step 1: Initialize the MCP session
   const authHeaders: Record<string, string> = accessToken
@@ -75,6 +76,7 @@ export async function fetchMcpSession(serverUrl: string, accessToken?: string): 
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json, text/event-stream",
+      "MCP-Protocol-Version": "2025-03-26",
       ...authHeaders,
     },
     body: JSON.stringify({
@@ -112,11 +114,16 @@ export async function fetchMcpSession(serverUrl: string, accessToken?: string): 
   if (!initResult?.result) {
     throw new Error(`MCP initialize returned unexpected result: ${JSON.stringify(initResult)}`);
   }
+  const initializeResult = initResult.result as Record<string, unknown>;
+  const protocolVersion = typeof initializeResult.protocolVersion === "string"
+    ? initializeResult.protocolVersion
+    : initResponse.headers.get("MCP-Protocol-Version") ?? "2025-03-26";
 
   // Step 2: Send initialized notification
   const notifyHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
+    "MCP-Protocol-Version": protocolVersion,
   };
   Object.assign(notifyHeaders, authHeaders);
   if (sessionId) {
@@ -136,6 +143,7 @@ export async function fetchMcpSession(serverUrl: string, accessToken?: string): 
   const toolsHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
+    "MCP-Protocol-Version": protocolVersion,
   };
   Object.assign(toolsHeaders, authHeaders);
   if (sessionId) {
@@ -169,7 +177,7 @@ export async function fetchMcpSession(serverUrl: string, accessToken?: string): 
     throw new Error(`MCP tools/list returned unexpected result: ${JSON.stringify(toolsResult)}`);
   }
 
-  return { tools: tools as McpToolDefinition[], sessionId };
+  return { tools: tools as McpToolDefinition[], sessionId, protocolVersion };
 }
 
 /** Convenience wrapper for callers that only need the tool definitions. */

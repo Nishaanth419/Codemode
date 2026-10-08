@@ -2,23 +2,25 @@
   "name": "code-mode-agent",
   "version": "1.0.0",
   "private": true,
-  "description": "Code Mode agent — converts MCP tools into a typed TypeScript API, has the LLM write code, and executes it in a sandboxed Dynamic Worker",
+  "type": "module",
+  "description": "Code Mode agent for INDmoney MCP, hosted on Firebase and Cloud Run with isolated generated-code execution",
   "scripts": {
-    "dev": "wrangler dev --ip 0.0.0.0 --port 8787",
-    "deploy": "wrangler deploy",
+    "dev": "node --env-file=.env --import tsx src/index.ts",
+    "start": "node --import tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test:tools": "curl -s http://localhost:8787/api/tools | jq ."
+    "test:tools": "curl -s http://localhost:8080/api/tools | jq ."
   },
   "dependencies": {
     "@ai-sdk/openai": "^4.0.80",
-    "@cloudflare/codemode": "^0.5.2",
-    "@cloudflare/workers-types": "^5.20260925.1",
-    "agents": "^0.24.0",
+    "@google-cloud/firestore": "^7.11.0",
     "ai": "^7.0.114",
+    "express": "^5.2.1",
+    "tsx": "^4.20.6",
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "typescript": "^7.0.2",
-    "wrangler": "^4.140.0"
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.18.6",
+    "typescript": "^7.0.2"
   }
 }
