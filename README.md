@@ -1,175 +1,110 @@
 # Code Mode Agent
 
-> Instead of exposing MCP tools directly to the LLM, convert them into a typed TypeScript API, have the LLM write code that calls that API, and execute it in a sandboxed Worker.
+An AI agent that connects to INDmoney's MCP server, generates JavaScript to process the returned portfolio data, and runs that code in an isolated Cloud Run sandbox. The website is an installable Progressive Web App (PWA).
 
-Inspired by [Cloudflare's Code Mode blog post](https://blog.cloudflare.com/code-mode/). This project implements the full pattern using Cloudflare Workers, Dynamic Workers, and the `@cloudflare/codemode` library.
+## Hosting layout
 
-## Architecture
+- **Firebase Hosting** serves the website, PWA manifest, service worker, and icon.
+- **Cloud Run** handles INDmoney OAuth, MCP requests, OpenAI requests, and sandboxed code execution.
+- **Cloud Firestore** stores short-lived per-browser OAuth sessions and refresh tokens.
+- Hosting rewrites `/api/**` and `/auth/**` to the Cloud Run service so the site and API share one origin. That keeps OAuth cookies same-site.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     User Request                             │
-│                    POST /api/chat                             │
-└──────────────────────┬──────────────────────────────────────┘
-                       ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Main Worker (src/index.ts)                      │
-│                                                              │
-│  1. Fetch MCP tool schemas (src/mcp-to-ts.ts)               │
-│  2. Generate TypeScript declarations + Zod schemas           │
-│  3. Build system prompt with typed API                       │
-│  4. Call LLM with single "codemode" tool                    │
-│                                                              │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │           LLM writes JavaScript code                    │  │
-│  │     const results = await codemode.search(...)          │  │
-│  └────────────────────────┬───────────────────────────────┘  │
-│                           ▼                                  │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │         Dynamic Worker Sandbox                          │  │
-│  │  • No network access (globalOutbound: null)             │  │
-│  │  • codemode proxy routes to real tool impls             │  │
-│  │  • Console output captured                              │  │
-│  │  • 30s timeout per execution                            │  │
-│  └────────────────────────┬───────────────────────────────┘  │
-│                           ▼                                  │
-│  Result → LLM → User response (streamed)                    │
-└─────────────────────────────────────────────────────────────┘
-```
+Generated code runs with Google's Cloud Run sandbox launcher. The sandbox has no outbound network access; its only host capability is a read-only-mounted local socket that forwards approved MCP tool calls. OpenAI keys and OAuth tokens stay in the Cloud Run service. Cloud Run sandboxes are currently a Preview feature and require a billing-enabled Google Cloud project. See [Cloud Run code execution](https://docs.cloud.google.com/run/docs/code-execution), [Cloud Run sandbox configuration](https://docs.cloud.google.com/run/docs/configuring/services/sandboxes), and [Firebase Hosting rewrites to Cloud Run](https://firebase.google.com/docs/hosting/cloud-run).
 
-## Why Code Mode?
+## Prerequisites
 
-Traditional MCP usage exposes each tool as a separate function call. The LLM calls them one at a time, passing results through context. This is:
-- **Expensive**: Each tool call round-trip costs tokens
-- **Slow**: Sequential tool calls can't be parallelized
-- **Noisy**: Tool results bloat the context window
-
-Code Mode flips this: the LLM writes a single code snippet that orchestrates multiple tool calls, processes data locally, and returns a focused result. Up to **80% fewer tokens** and better results.
-
-## Setup
-
-### Prerequisites
-
-- Node.js 18+
-- A Cloudflare account (for production deployment)
+- Node.js 22+
+- A Firebase project with billing enabled (Blaze)
+- `firebase-tools` and the Google Cloud CLI (`gcloud`)
 - An OpenAI API key
+- Firestore Native mode enabled in the Firebase project
 
-### Local Development
+## Local development
 
 ```bash
-# 1. Install dependencies
-npm install
+npm ci
+cp .env.example .env
+```
 
-# 2. Set your OpenAI API key in .dev.vars
-echo "OPENAI_API_KEY=sk-your-actual-key" > .dev.vars
+Add your OpenAI key to `.env`, set `APP_ORIGIN=http://localhost:8080`, and authenticate application-default credentials for a Firebase project with Firestore enabled:
 
-# 3. Start the dev server
+```bash
+gcloud auth application-default login
+gcloud config set project YOUR_FIREBASE_PROJECT_ID
 npm run dev
 ```
 
-The server starts at `http://localhost:8787`. Open it in a browser and choose **Connect INDmoney**. Sign in and approve the requested read-only access on INDmoney's page; the app never asks for your OTP or MPIN.
+The web app is available at `http://localhost:8080`. A local machine does not have the Cloud Run sandbox launcher, so code execution requires deploying the backend to Cloud Run with sandbox launching enabled.
 
-The OAuth authorization code flow uses PKCE. Tokens are kept in a Durable Object session and refreshed when possible. The browser receives only an HTTP-only session cookie.
+## Deploy to Firebase and Cloud Run
 
-After connecting, ask a question in the chat. Use **Disconnect** to revoke the INDmoney access token and clear the local session.
+1. Select your Firebase project and enable billing. Cloud Run sandbox support also requires billing and the second-generation Cloud Run environment.
 
-## Project Structure
+2. Create the Firestore database in the same region as the backend:
 
-```
-├── src/
-│   ├── index.ts          # Worker entrypoint — routes HTTP requests
-│   ├── agent.ts          # Code Mode agent loop (LLM + codemode tool)
-│   ├── mcp-to-ts.ts      # MCP schema fetcher + TypeScript codegen
-│   └── sandbox-worker.ts # Dynamic Worker sandbox configuration
-├── wrangler.toml         # Cloudflare Workers config with Worker Loader binding
-├── .env                  # Local dev secrets (not committed)
-├── tsconfig.json         # TypeScript configuration
-└── package.json          # Dependencies and scripts
-```
-
-### Key Files
-
-| File | Purpose |
-|------|---------|
-| [`src/mcp-to-ts.ts`](src/mcp-to-ts.ts) | Connects to MCP server via Streamable HTTP, fetches tool schemas, converts JSON Schema → Zod schemas + TypeScript declarations |
-| [`src/agent.ts`](src/agent.ts) | The agent loop: builds system prompt with generated API types, creates `codemode` tool via `@cloudflare/codemode`, streams LLM response |
-| [`src/sandbox-worker.ts`](src/sandbox-worker.ts) | Configures the `DynamicWorkerExecutor` with no network access and 30s timeout |
-| [`src/index.ts`](src/index.ts) | HTTP routing: `/api/chat` for the agent, `/api/tools` for debugging |
-
-## Adding a New MCP Server
-
-1. **Change the server URL** in `wrangler.toml`:
-   ```toml
-   [vars]
-   MCP_SERVER_URL = "https://your-mcp-server.example.com/mcp"
+   ```bash
+   gcloud config set project YOUR_FIREBASE_PROJECT_ID
+   gcloud firestore databases create --location=asia-south1
    ```
 
-2. For OAuth protected services, implement their OAuth discovery and token flow before connecting. The included OAuth routes target INDmoney's published MCP authorization metadata.
+   If the project already has a Firestore database, keep its current location; do not create another database just for this app.
 
-3. Once configured, the agent automatically:
-   - Connects to the new server on each request
-   - Fetches tool schemas via `tools/list`
-   - Generates TypeScript declarations
-   - Updates the system prompt
+   Configure automatic cleanup for expired OAuth session documents:
 
-For multiple MCP servers, you'd extend the code to accept an array of URLs and merge the tool schemas. The `mcp-to-ts.ts` module is designed to be composable.
+   ```bash
+   gcloud firestore fields ttls update sessionExpiresAt \
+     --collection-group=indmoney_sessions \
+     --enable-ttl
+   ```
 
-## How It Works Under the Hood
+3. Add `OPENAI_API_KEY` to Google Secret Manager. Grant the Cloud Run service identity access to this secret and the `roles/datastore.user` role for Firestore.
 
-### 1. MCP → TypeScript Codegen (`mcp-to-ts.ts`)
+4. Create a `.firebaserc` from `.firebaserc.example`, replacing the placeholder with your project ID. Set `APP_ORIGIN` to `https://YOUR_FIREBASE_PROJECT_ID.web.app`.
 
+5. Deploy the backend with the sandbox launcher enabled. This app uses region `asia-south1` and service name `codemode-api`, matching `firebase.json`:
+
+   ```bash
+   gcloud beta run deploy codemode-api \
+     --source . \
+     --region asia-south1 \
+     --sandbox-launcher \
+     --allow-unauthenticated \
+     --memory 2Gi \
+     --concurrency 2 \
+     --max 3 \
+     --set-secrets OPENAI_API_KEY=OPENAI_API_KEY:latest \
+     --set-env-vars MCP_SERVER_URL=https://mcp.indmoney.com/mcp,APP_ORIGIN=https://YOUR_FIREBASE_PROJECT_ID.web.app
+   ```
+
+   The service must allow unauthenticated invocation for Firebase Hosting rewrites. The API still requires an INDmoney OAuth session for account data.
+
+6. Deploy the website and rewrites:
+
+   ```bash
+   firebase deploy --only hosting
+   ```
+
+7. Open the Firebase Hosting URL and choose **Connect INDmoney**. OAuth callback URLs use that origin, so finish authorization on the same `web.app` or custom domain you will use for the app.
+
+Set a budget alert in Google Cloud before sharing the app. Cloud Run sandboxes use the service's allocated CPU and memory, and Google Cloud services require a billing account even when usage fits within a no-cost quota.
+
+## Install the app
+
+Open the deployed HTTPS site in a supported browser and choose **Install app** or **Add to Home Screen**. The app shell is available offline; INDmoney login, portfolio data, and AI responses need an internet connection.
+
+## Android APK
+
+The website is already configured as a PWA. A store-ready Android package still needs an Android wrapper (for example, a Trusted Web Activity or Capacitor), a public HTTPS app URL, and a release signing key. Keep the signing key outside the repository and store it in GitHub Actions secrets if building APKs from CI.
+
+## Project structure
+
+```text
+src/
+  index.ts             Express API, INDmoney OAuth, Firestore session storage
+  agent.ts             AI loop and MCP tool proxy
+  mcp-to-ts.ts         MCP schema fetcher and TypeScript API generator
+  sandbox-worker.ts    Cloud Run sandbox executor and restricted MCP socket bridge
+  public/              Firebase Hosting website and PWA assets
+firebase.json          Static hosting and same-origin Cloud Run rewrites
+Dockerfile             Cloud Run container
 ```
-MCP Server (tools/list) → JSON Schema → Zod Schema + TypeScript Declarations
-```
-
-For each MCP tool, we generate:
-- A **Zod schema** for runtime validation of tool parameters
-- A **TypeScript function signature** (e.g., `search(query: string): Promise<unknown>`)
-- A **JSDoc comment block** with parameter descriptions
-
-### 2. Code Mode Tool (`agent.ts`)
-
-The `@cloudflare/codemode` library's `createCodeTool()` takes our generated tools and wraps them into a single AI SDK `tool()` called `codemode`. The tool's description includes the full TypeScript API surface, so the LLM knows exactly what's available.
-
-### 3. Sandboxed Execution (`sandbox-worker.ts`)
-
-When the LLM writes code, `DynamicWorkerExecutor` spins up a fresh Dynamic Worker:
-- **No `fetch()`** — `globalOutbound: null` blocks all network access
-- **Typed proxy** — A `codemode` object routes method calls back to real tool implementations via Workers RPC
-- **Captured output** — `console.log()` calls are captured and returned
-- **Fresh isolate** — Each execution gets a clean V8 isolate, no state leaks
-
-## Deployment
-
-The app is served by one Cloudflare Worker: the same URL hosts the website, API, and installable PWA. No separate frontend hosting service is needed.
-
-> **Plan requirement:** This agent uses Cloudflare Dynamic Workers to run generated code. Dynamic Workers require Cloudflare's Workers Paid plan, which currently starts at $5/month; additional usage may be billed. See [Dynamic Workers pricing](https://developers.cloudflare.com/dynamic-workers/pricing/) before enabling billing.
-
-```bash
-# Authenticate Wrangler with your Cloudflare account
-npx wrangler login
-
-# Store the OpenAI key as a Worker secret
-wrangler secret put OPENAI_API_KEY
-
-# Publish the website and API
-npm run deploy
-```
-
-Wrangler prints the public `workers.dev` URL after deployment. Open that URL and choose **Connect INDmoney** to authorize the account. OAuth callback URLs are derived from the URL being used, so connect using the final public HTTPS hostname. You can attach a custom domain later under the Worker’s Domains & Routes settings.
-
-### Install the app
-
-The site is an installable Progressive Web App (PWA). On a supported browser, open the deployed HTTPS site and choose **Install app** (Chrome/Edge) or **Add to Home Screen** (iOS Safari). The cached shell can open offline; sign-in, portfolio data, and AI responses still require an internet connection.
-
-The PWA and website share the same Worker deployment and URL. Publishing native App Store or Google Play packages would require a separate native app project and store accounts.
-
-The deployment needs the `AuthSessionStore` Durable Object binding and migration declared in `wrangler.toml`. OAuth callback URLs use the current application origin, so use the deployed HTTPS URL when connecting in production.
-
-## References
-
-- [Code Mode: the better way to use MCP](https://blog.cloudflare.com/code-mode/) — Cloudflare blog post
-- [Dynamic Workers docs](https://developers.cloudflare.com/dynamic-workers/) — API reference
-- [Dynamic Workers Code Mode example](https://developers.cloudflare.com/dynamic-workers/examples/codemode/) — Official example
-- [`@cloudflare/codemode` npm](https://www.npmjs.com/package/@cloudflare/codemode) — The codemode library
-- [Vercel AI SDK](https://sdk.vercel.ai/docs) — LLM integration

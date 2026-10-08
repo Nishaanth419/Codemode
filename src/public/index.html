@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Code Mode Agent</title>
-  <meta name="description" content="An AI agent that writes and executes code to answer your questions using MCP tools in a sandboxed Cloudflare Worker." />
+  <meta name="description" content="An AI agent that writes and executes code to answer your questions using INDmoney MCP tools in an isolated Cloud Run sandbox." />
   <meta name="theme-color" content="#0a0c14" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -692,7 +692,7 @@
   <div class="logo-mark">⌘</div>
   <div>
     <div class="logo-text">Code Mode</div>
-    <div class="logo-sub">MCP → TypeScript → Sandboxed Worker</div>
+      <div class="logo-sub">MCP → TypeScript → Sandboxed Code</div>
   </div>
   <div class="topbar-spacer"></div>
   <button id="auth-button" class="auth-button" type="button">Connect INDmoney</button>
@@ -733,7 +733,7 @@
         <div class="empty-title">Code Mode Agent</div>
         <div class="empty-sub" style="margin-top:8px">
           The agent writes JavaScript that calls a typed MCP API, then executes it
-          in a sandboxed Cloudflare Worker — no direct tool calls, no context bloat.
+          in an isolated Cloud Run sandbox — no direct tool calls, no context bloat.
         </div>
       </div>
       <div class="example-prompts">

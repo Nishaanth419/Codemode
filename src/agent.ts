@@ -1,17 +1,17 @@
 /**
  * agent.ts — Code Mode Agent Loop
  *
- * Implements the core "Code Mode" pattern from Cloudflare's blog post:
+ * Implements the Code Mode pattern with isolated generated-code execution:
  * Instead of exposing N individual tools to the LLM, we expose a single
  * "execute code" tool. The LLM writes TypeScript that calls a typed API,
- * and that code runs in a sandboxed Dynamic Worker.
+ * and that code runs in an isolated Cloud Run sandbox.
  *
  * Flow:
  * 1. On startup, fetch tool schemas from the configured MCP server
  * 2. Convert schemas to TypeScript declarations and ToolDescriptors
- * 3. Use @cloudflare/codemode's createCodeTool to wrap them into one "codemode" tool
+ * 3. Expose one "codemode" tool backed by a Cloud Run sandbox executor
  * 4. Pass user message + system prompt (with API types) to the LLM via streamText
- * 5. LLM writes code → DynamicWorkerExecutor runs it → result returned to LLM
+ * 5. LLM writes code → isolated sandbox runs it → result returned to LLM
  * 6. LLM uses the result to respond to the user (or writes more code)
  *
  * Why this is better than raw MCP tool calls:
@@ -20,12 +20,10 @@
  * - Single round-trip for multi-tool workflows
  */
 
-import { streamText, isStepCount } from "ai";
+import { streamText, isStepCount, tool } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
-import { createCodeTool, aiTools } from "@cloudflare/codemode/ai";
-import { DynamicWorkerExecutor } from "@cloudflare/codemode";
-import type { ToolDescriptors } from "@cloudflare/codemode/ai";
 import { z } from "zod";
+import { CloudRunSandboxExecutor } from "./sandbox-worker";
 
 import {
   fetchMcpSession,
@@ -34,13 +32,17 @@ import {
   type GeneratedTool,
 } from "./mcp-to-ts";
 
-/** Environment bindings — matches wrangler.toml */
+/** Environment values configured on the Cloud Run service. */
 export interface Env {
-  LOADER: unknown; // Worker Loader binding (Dynamic Workers API)
   OPENAI_API_KEY: string;
   MCP_SERVER_URL: string;
-  AUTH_SESSIONS: DurableObjectNamespace;
 }
+
+type ToolDescriptors = Record<string, {
+  description: string;
+  inputSchema: z.ZodTypeAny;
+  execute: (args: unknown) => Promise<unknown>;
+}>;
 
 /**
  * Build the system prompt that teaches the LLM about the Code Mode pattern.
@@ -74,7 +76,7 @@ ${apiDeclaration}
 2. **Process data in code** — Filter, map, and transform in code. This saves tokens.
 3. **Combine multiple calls** — Call multiple API methods in one snippet. Much more
    efficient than separate tool invocations.
-4. **Return results** — The last expression in your code is the return value.
+4. **Return results** — Return the final value explicitly with `return`.
 5. **Use console.log** — Output is captured and returned to you for debugging.
 6. **Handle errors** — Use try/catch for operations that might fail.
 7. **No network access** — \`fetch()\` is blocked. Use the \`codemode\` API only.
@@ -96,19 +98,20 @@ ${apiDeclaration}
 
 ## Example
 
-If asked "search for information about Workers AI", write:
+If asked to search for information, write:
 
 \`\`\`javascript
-const results = await codemode.search({ query: "Workers AI" });
-console.log("Found", results.length, "results");
-results
+async () => {
+  const results = await codemode.search({ query: "portfolio" });
+  console.log("Found", results.length, "results");
+  return results;
+}
 \`\`\`
 `;
 }
 
 /**
- * Convert GeneratedTool definitions into the ToolDescriptors format expected
- * by @cloudflare/codemode. Each entry has a description, an inputSchema (Zod),
+ * Convert generated MCP tools into descriptors with an inputSchema (Zod),
  * and an execute function that proxies the call to the MCP server.
  *
  * We use ToolDescriptors (not AI SDK tool()) because it maps directly to the
@@ -260,7 +263,7 @@ export async function runAgent(userMessage: string, env: Env, accessToken: strin
   const apiDeclaration = generateApiDeclaration(generatedTools);
   const systemPrompt = buildSystemPrompt(apiDeclaration);
 
-  // Step 3: Build ToolDescriptors and wrap them with aiTools() for the codemode library
+  // Step 3: Build the host-side MCP functions that the sandbox may invoke.
   const mcpToolErrors: string[] = [];
   const toolDescriptors = buildToolDescriptors(
     generatedTools,
@@ -270,26 +273,20 @@ export async function runAgent(userMessage: string, env: Env, accessToken: strin
     protocolVersion,
     (message) => mcpToolErrors.push(message)
   );
-  const toolProvider = aiTools(toolDescriptors);
-
-  // Step 4: Create the sandbox executor
-  // Each invocation of the codemode tool spins up a fresh Dynamic Worker isolate.
-  // - globalOutbound: null blocks all fetch() inside the sandbox
-  // - Tools are dispatched back to this Worker via Workers RPC
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- LOADER is opaque from wrangler binding types
-  const executor = new DynamicWorkerExecutor({
-    loader: env.LOADER as any,
-    timeout: 30_000,
-    globalOutbound: null,
-  });
-
-  // Step 5: Create the single "codemode" tool that the LLM calls
-  // createCodeTool generates TypeScript types from the tool descriptors and
-  // puts them in the tool description, so the LLM sees a typed API surface.
-  const codemodeTool = createCodeTool({
-    // Pass as a single-element array — ToolProvider[] overload of CreateCodeToolOptions
-    tools: [toolProvider],
-    executor,
+  // Step 4: Create the isolated Cloud Run sandbox executor and expose a single
+  // code tool to the model, keeping MCP credentials in the parent service.
+  const executor = new CloudRunSandboxExecutor();
+  const codemodeTool = tool({
+    description: `Execute JavaScript to achieve the user's goal. It runs in an isolated sandbox with no outbound network access. The only external operations are these typed MCP functions:\n\n${apiDeclaration}\n\nWrite an async arrow function and return the result, for example: async () => { const holdings = await codemode.getHoldings({}); return holdings; }`,
+    inputSchema: z.object({ code: z.string().describe("JavaScript async arrow function to execute") }),
+    execute: async ({ code }) => {
+      const result = await executor.execute(code, [{
+        name: "codemode",
+        fns: Object.fromEntries(Object.entries(toolDescriptors).map(([name, descriptor]) => [name, descriptor.execute])),
+      }]);
+      if (result.error) throw new Error(result.error);
+      return result.logs?.length ? { result: result.result, logs: result.logs } : { result: result.result };
+    },
   });
 
   // Step 6: Call the LLM via Vercel AI SDK streamText

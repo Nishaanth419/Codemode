@@ -1,31 +1,7 @@
-/**
- * index.ts — Worker Entrypoint
- *
- * Routes incoming HTTP requests:
- * - GET  /             → Serves the chat frontend (src/public/index.html)
- * - POST /api/chat     → Run the Code Mode agent with a user message (streaming)
- * - GET  /api/tools    → List available MCP tools and generated TypeScript declarations
- *
- * This Worker holds MCP credentials. API keys never enter generated code —
- * all MCP calls from the Dynamic Worker sandbox route back through here via RPC.
- */
-
-// Wrangler inlines static assets referenced with the `Text` module type.
-// See wrangler.toml [rules] section.
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore -- HTML module type is resolved by wrangler at bundle time
-import FRONTEND_HTML from "./public/index.html";
-// @ts-ignore -- PWA files are served as text modules by Wrangler.
-import WEB_MANIFEST from "./public/manifest.webmanifest";
-// @ts-ignore -- PWA files are served as text modules by Wrangler.
-import SERVICE_WORKER from "./public/sw.js";
-// @ts-ignore -- PWA files are served as text modules by Wrangler.
-import APP_ICON from "./public/icon.svg";
-
-
+import express from "express";
+import { Firestore } from "@google-cloud/firestore";
 import { runAgent, type Env } from "./agent";
 import { fetchMcpSession, mcpToolsToGenerated, generateApiDeclaration } from "./mcp-to-ts";
-import { DurableObject } from "cloudflare:workers";
 
 interface OAuthSession {
   state?: string;
@@ -38,27 +14,25 @@ interface OAuthSession {
   expiresAt?: number;
 }
 
-/** Durable, per-browser storage for the OAuth flow and INDmoney tokens. */
-export class AuthSessionStore extends DurableObject {
-  async fetch(request: Request): Promise<Response> {
-    if (request.method === "GET") {
-      return Response.json((await this.ctx.storage.get<OAuthSession>("session")) ?? {});
-    }
-    if (request.method === "PUT") {
-      await this.ctx.storage.put("session", await request.json<OAuthSession>());
-      return new Response(null, { status: 204 });
-    }
-    if (request.method === "DELETE") {
-      await this.ctx.storage.delete("session");
-      return new Response(null, { status: 204 });
-    }
-    return new Response("Method not allowed", { status: 405 });
-  }
-}
-
 const MCP_RESOURCE = "https://mcp.indmoney.com/mcp";
 const MCP_RESOURCE_METADATA = "https://mcp.indmoney.com/.well-known/oauth-protected-resource/mcp";
 const SESSION_COOKIE = "indmoney_session";
+const SESSION_COLLECTION = "indmoney_sessions";
+const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+const firestore = new Firestore();
+const app = express();
+app.set("trust proxy", 1);
+app.use(express.json({ limit: "64kb" }));
+app.use("/api", (_request, response, next) => {
+  response.set("Cache-Control", "no-store");
+  next();
+});
+
+const env: Env = {
+  OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? "",
+  MCP_SERVER_URL: process.env.MCP_SERVER_URL ?? MCP_RESOURCE,
+};
 
 function base64Url(bytes: Uint8Array): string {
   let binary = "";
@@ -70,36 +44,59 @@ function randomToken(): string {
   return base64Url(crypto.getRandomValues(new Uint8Array(32)));
 }
 
-async function getSessionStore(env: Env, sessionId: string): Promise<OAuthSession> {
-  const id = env.AUTH_SESSIONS.idFromName(sessionId);
-  const response = await env.AUTH_SESSIONS.get(id).fetch("https://session.internal/", { method: "GET" });
-  return await response.json<OAuthSession>();
+function sessionIdFromRequest(request: express.Request): string | null {
+  return parseCookie(request.headers.cookie, SESSION_COOKIE);
 }
 
-async function saveSessionStore(env: Env, sessionId: string, session: OAuthSession): Promise<void> {
-  const id = env.AUTH_SESSIONS.idFromName(sessionId);
-  await env.AUTH_SESSIONS.get(id).fetch("https://session.internal/", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(session),
+function parseCookie(cookieHeader: string | undefined, name: string): string | null {
+  const pair = cookieHeader?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`));
+  return pair ? decodeURIComponent(pair.slice(name.length + 1)) : null;
+}
+
+async function getSessionStore(sessionId: string): Promise<OAuthSession> {
+  const ref = firestore.collection(SESSION_COLLECTION).doc(sessionId);
+  const snapshot = await ref.get();
+  if (!snapshot.exists) return {};
+  const stored = snapshot.data() as (OAuthSession & { updatedAt?: number }) | undefined;
+  if (stored?.updatedAt && Date.now() - stored.updatedAt > SESSION_MAX_AGE_MS) {
+    await ref.delete();
+    return {};
+  }
+  return stored ?? {};
+}
+
+async function saveSessionStore(sessionId: string, session: OAuthSession): Promise<void> {
+  await firestore.collection(SESSION_COLLECTION).doc(sessionId).set({
+    ...session,
+    updatedAt: Date.now(),
+    sessionExpiresAt: new Date(Date.now() + SESSION_MAX_AGE_MS),
   });
 }
 
-function sessionIdFromRequest(request: Request): string | null {
-  const cookie = request.headers.get("Cookie") ?? "";
-  return cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${SESSION_COOKIE}=`))
-    ?.slice(SESSION_COOKIE.length + 1) ?? null;
+async function deleteSessionStore(sessionId: string): Promise<void> {
+  await firestore.collection(SESSION_COLLECTION).doc(sessionId).delete();
 }
 
-function sessionCookie(id: string, request: Request): string {
-  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
-  return `${SESSION_COOKIE}=${id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000${secure}`;
+function publicOrigin(request: express.Request): string {
+  const configured = process.env.APP_ORIGIN?.trim();
+  if (configured) return configured.replace(/\/$/, "");
+  return `${request.protocol}://${request.get("host")}`;
 }
 
-async function accessTokenForRequest(request: Request, env: Env): Promise<string | null> {
+function setSessionCookie(request: express.Request, response: express.Response, sessionId: string): void {
+  response.cookie(SESSION_COOKIE, sessionId, {
+    httpOnly: true,
+    secure: request.secure,
+    sameSite: "lax",
+    path: "/",
+    maxAge: SESSION_MAX_AGE_MS,
+  });
+}
+
+async function accessTokenForRequest(request: express.Request): Promise<string | null> {
   const sessionId = sessionIdFromRequest(request);
   if (!sessionId) return null;
-  const session = await getSessionStore(env, sessionId);
+  const session = await getSessionStore(sessionId);
   if (session.accessToken && (session.expiresAt ?? 0) > Date.now() + 30_000) return session.accessToken;
   if (!session.refreshToken || !session.clientId || !session.clientSecret) return null;
 
@@ -120,18 +117,17 @@ async function accessTokenForRequest(request: Request, env: Env): Promise<string
   session.accessToken = token.access_token;
   session.refreshToken = token.refresh_token ?? session.refreshToken;
   session.expiresAt = Date.now() + (token.expires_in ?? 3600) * 1000;
-  await saveSessionStore(env, sessionId, session);
+  await saveSessionStore(sessionId, session);
   return session.accessToken;
 }
 
-async function connectToIndMoney(request: Request, env: Env): Promise<Response> {
-  const redirectUri = new URL("/auth/indmoney/callback", request.url).toString();
+async function connectToIndMoney(request: express.Request, response: express.Response): Promise<void> {
+  const redirectUri = `${publicOrigin(request)}/auth/indmoney/callback`;
   const sessionId = randomToken();
   const state = randomToken();
   const verifier = randomToken();
   const challenge = base64Url(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))));
 
-  // INDmoney advertises OAuth Authorization Code + PKCE and a registration endpoint.
   const resourceResponse = await fetch(MCP_RESOURCE_METADATA);
   if (!resourceResponse.ok) throw new Error(`INDmoney resource metadata failed: HTTP ${resourceResponse.status}`);
   const resourceMetadata = await resourceResponse.json<{ authorization_servers?: string[] }>();
@@ -163,7 +159,7 @@ async function connectToIndMoney(request: Request, env: Env): Promise<Response> 
   const client = await registrationResponse.json<{ client_id: string; client_secret?: string }>();
   if (!client.client_id || !client.client_secret) throw new Error("INDmoney registration did not return the required client credentials");
 
-  await saveSessionStore(env, sessionId, {
+  await saveSessionStore(sessionId, {
     state, verifier, clientId: client.client_id, clientSecret: client.client_secret, redirectUri,
   });
 
@@ -178,253 +174,134 @@ async function connectToIndMoney(request: Request, env: Env): Promise<Response> 
     resource: MCP_RESOURCE,
     scope: "portfolio:read market:read",
   }).toString();
-  return new Response(null, {
-    status: 302,
-    headers: { Location: authorize.toString(), "Set-Cookie": sessionCookie(sessionId, request), "Cache-Control": "no-store" },
-  });
+  setSessionCookie(request, response, sessionId);
+  response.setHeader("Cache-Control", "no-store");
+  response.redirect(302, authorize.toString());
 }
 
-async function finishIndMoneyLogin(request: Request, env: Env): Promise<Response> {
-  const url = new URL(request.url);
-  const error = url.searchParams.get("error_description") ?? url.searchParams.get("error");
-  if (error) return new Response(`INDmoney sign-in was not completed: ${error}`, { status: 400 });
+async function finishIndMoneyLogin(request: express.Request, response: express.Response): Promise<void> {
+  const error = request.query.error_description ?? request.query.error;
+  if (error) {
+    response.status(400).type("text/plain").send(`INDmoney sign-in was not completed: ${String(error)}`);
+    return;
+  }
   const sessionId = sessionIdFromRequest(request);
-  const session = sessionId ? await getSessionStore(env, sessionId) : {};
-  const code = url.searchParams.get("code");
+  const session = sessionId ? await getSessionStore(sessionId) : {};
+  const code = request.query.code;
   if (!sessionId || !session.state || !session.verifier || !session.clientId || !session.clientSecret ||
-      !code || url.searchParams.get("state") !== session.state) {
-    return new Response("INDmoney sign-in could not be verified. Please connect again.", { status: 400 });
+      typeof code !== "string" || request.query.state !== session.state) {
+    response.status(400).type("text/plain").send("INDmoney sign-in could not be verified. Please connect again.");
+    return;
   }
 
   const form = new URLSearchParams({
     grant_type: "authorization_code",
     code,
-    redirect_uri: session.redirectUri ?? new URL("/auth/indmoney/callback", request.url).toString(),
+    redirect_uri: session.redirectUri ?? `${publicOrigin(request)}/auth/indmoney/callback`,
     client_id: session.clientId,
     client_secret: session.clientSecret,
     code_verifier: session.verifier,
     resource: MCP_RESOURCE,
   });
-  const response = await fetch("https://mcp.indmoney.com/token", {
+  const tokenResponse = await fetch("https://mcp.indmoney.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: form,
   });
-  if (!response.ok) return new Response(`INDmoney token exchange failed: HTTP ${response.status} ${(await response.text()).slice(0, 500)}`, { status: 502 });
-  const token = await response.json<{ access_token: string; refresh_token?: string; expires_in?: number }>();
+  if (!tokenResponse.ok) {
+    response.status(502).type("text/plain").send(`INDmoney token exchange failed: HTTP ${tokenResponse.status} ${(await tokenResponse.text()).slice(0, 500)}`);
+    return;
+  }
+  const token = await tokenResponse.json<{ access_token: string; refresh_token?: string; expires_in?: number }>();
   session.accessToken = token.access_token;
   session.refreshToken = token.refresh_token;
   session.expiresAt = Date.now() + (token.expires_in ?? 3600) * 1000;
   delete session.state;
   delete session.verifier;
-  await saveSessionStore(env, sessionId, session);
-  return new Response(null, { status: 302, headers: { Location: "/", "Cache-Control": "no-store" } });
+  await saveSessionStore(sessionId, session);
+  response.setHeader("Cache-Control", "no-store");
+  response.redirect(302, `${publicOrigin(request)}/`);
 }
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-
-    // ── CORS headers for frontend consumption ────────────────────────
-    const corsHeaders: Record<string, string> = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    };
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
+app.get("/healthz", (_request, response) => response.json({ ok: true }));
+app.get("/auth/indmoney/connect", async (request, response, next) => {
+  try { await connectToIndMoney(request, response); } catch (error) { next(error); }
+});
+app.get("/auth/indmoney/callback", async (request, response, next) => {
+  try { await finishIndMoneyLogin(request, response); } catch (error) { next(error); }
+});
+app.post("/auth/indmoney/disconnect", async (request, response, next) => {
+  try {
+    const sessionId = sessionIdFromRequest(request);
+    if (sessionId) {
+      const session = await getSessionStore(sessionId);
+      if (session.accessToken && session.clientId && session.clientSecret) {
+        const revokeForm = new URLSearchParams({
+          token: session.accessToken,
+          token_type_hint: "access_token",
+          client_id: session.clientId,
+          client_secret: session.clientSecret,
+        });
+        await fetch("https://mcp.indmoney.com/revoke", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: revokeForm,
+        }).catch((error) => console.error("INDmoney token revocation failed:", error));
+      }
+      await deleteSessionStore(sessionId);
     }
+    response.clearCookie(SESSION_COOKIE, { httpOnly: true, secure: request.secure, sameSite: "lax", path: "/" });
+    response.json({ connected: false });
+  } catch (error) { next(error); }
+});
 
-    try {
-      if (request.method === "GET" && url.pathname === "/manifest.webmanifest") {
-        return new Response(WEB_MANIFEST as string, {
-          headers: { "Content-Type": "application/manifest+json", "Cache-Control": "public, max-age=3600" },
-        });
-      }
-      if (request.method === "GET" && url.pathname === "/sw.js") {
-        return new Response(SERVICE_WORKER as string, {
-          headers: { "Content-Type": "application/javascript; charset=UTF-8", "Cache-Control": "no-cache", "Service-Worker-Allowed": "/" },
-        });
-      }
-      if (request.method === "GET" && url.pathname === "/icon.svg") {
-        return new Response(APP_ICON as string, {
-          headers: { "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400" },
-        });
-      }
-
-      if (url.pathname === "/auth/indmoney/connect" && request.method === "GET") {
-        return await connectToIndMoney(request, env);
-      }
-      if (url.pathname === "/auth/indmoney/callback" && request.method === "GET") {
-        return await finishIndMoneyLogin(request, env);
-      }
-      if (url.pathname === "/auth/indmoney/disconnect" && request.method === "POST") {
-        const sessionId = sessionIdFromRequest(request);
-        if (sessionId) {
-          const session = await getSessionStore(env, sessionId);
-          if (session.accessToken && session.clientId && session.clientSecret) {
-            const revokeForm = new URLSearchParams({
-              token: session.accessToken,
-              token_type_hint: "access_token",
-              client_id: session.clientId,
-              client_secret: session.clientSecret,
-            });
-            await fetch("https://mcp.indmoney.com/revoke", {
-              method: "POST",
-              headers: { "Content-Type": "application/x-www-form-urlencoded" },
-              body: revokeForm,
-            }).catch((error) => console.error("INDmoney token revocation failed:", error));
-          }
-          const id = env.AUTH_SESSIONS.idFromName(sessionId);
-          await env.AUTH_SESSIONS.get(id).fetch("https://session.internal/", { method: "DELETE" });
-        }
-        return new Response(JSON.stringify({ connected: false }), {
-          headers: { "Content-Type": "application/json", "Set-Cookie": `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0` },
-        });
-      }
-
-      switch (url.pathname) {
-        // ── POST /api/chat — Main agent endpoint ───────────────────
-        case "/api/chat": {
-          if (request.method !== "POST") {
-            return jsonResponse(
-              { error: "Method not allowed. Use POST." },
-              405,
-              corsHeaders
-            );
-          }
-
-          const body = await request.json<{ message?: string }>();
-          const userMessage = body?.message;
-
-          if (!userMessage || typeof userMessage !== "string") {
-            return jsonResponse(
-              { error: "Missing 'message' field in request body" },
-              400,
-              corsHeaders
-            );
-          }
-
-          if (!env.OPENAI_API_KEY || env.OPENAI_API_KEY === "sk-your-key-here") {
-            return jsonResponse(
-              {
-                error: "OPENAI_API_KEY not configured",
-                hint: "Set it in .dev.vars for local dev, or via `wrangler secret put OPENAI_API_KEY` for production",
-              },
-              500,
-              corsHeaders
-            );
-          }
-
-          const accessToken = await accessTokenForRequest(request, env);
-          if (!accessToken) {
-            return jsonResponse({
-              error: "Connect your INDmoney account before chatting.",
-              loginUrl: "/auth/indmoney/connect",
-            }, 401, corsHeaders);
-          }
-
-          // Run the agent and return the streaming response
-          const response = await runAgent(userMessage, env, accessToken);
-
-          // Add CORS headers to the streaming response
-          const headers = new Headers(response.headers);
-          for (const [key, value] of Object.entries(corsHeaders)) {
-            headers.set(key, value);
-          }
-
-          return new Response(response.body, {
-            status: response.status,
-            headers,
-          });
-        }
-
-        // ── GET /api/tools — Debug endpoint to inspect MCP tools ───
-        case "/api/tools": {
-          if (request.method !== "GET") {
-            return jsonResponse(
-              { error: "Method not allowed. Use GET." },
-              405,
-              corsHeaders
-            );
-          }
-
-          const accessToken = await accessTokenForRequest(request, env);
-          if (!accessToken) {
-            return jsonResponse({
-              mcpServer: env.MCP_SERVER_URL,
-              connected: false,
-              toolCount: 0,
-              tools: [],
-              loginUrl: "/auth/indmoney/connect",
-            }, 200, corsHeaders);
-          }
-
-          const mcpSession = await fetchMcpSession(env.MCP_SERVER_URL, accessToken);
-          const generated = mcpToolsToGenerated(mcpSession.tools);
-          const apiDeclaration = generateApiDeclaration(generated);
-
-          return jsonResponse(
-            {
-              mcpServer: env.MCP_SERVER_URL,
-              connected: true,
-              toolCount: generated.length,
-              tools: generated.map((t) => ({
-                name: t.name,
-                description: t.description,
-                tsSignature: t.tsSignature,
-              })),
-              apiDeclaration,
-            },
-            200,
-            corsHeaders
-          );
-        }
-
-        // ── GET / — Serve the chat frontend ───────────────────────
-        case "/": {
-          if (request.method !== "GET") {
-            return jsonResponse({ error: "Method not allowed. Use GET." }, 405, corsHeaders);
-          }
-          return new Response(FRONTEND_HTML as string, {
-            headers: { 
-              "Content-Type": "text/html;charset=UTF-8",
-              "Cache-Control": "no-cache, no-store, must-revalidate"
-            },
-          });
-        }
-
-        default:
-          return jsonResponse({ error: "Not found" }, 404, corsHeaders);
-      }
-    } catch (error) {
-      console.error("Unhandled error:", error);
-      return jsonResponse(
-        {
-          error: "Internal server error",
-          details: error instanceof Error ? error.message : String(error),
-        },
-        500,
-        corsHeaders
-      );
+app.get("/api/tools", async (request, response, next) => {
+  try {
+    const accessToken = await accessTokenForRequest(request);
+    if (!accessToken) {
+      response.json({ mcpServer: env.MCP_SERVER_URL, connected: false, toolCount: 0, tools: [], loginUrl: "/auth/indmoney/connect" });
+      return;
     }
-  },
-} satisfies ExportedHandler<Env>;
+    const mcpSession = await fetchMcpSession(env.MCP_SERVER_URL, accessToken);
+    const generated = mcpToolsToGenerated(mcpSession.tools);
+    response.json({
+      mcpServer: env.MCP_SERVER_URL,
+      connected: true,
+      toolCount: generated.length,
+      tools: generated.map((item) => ({ name: item.name, description: item.description, tsSignature: item.tsSignature })),
+      apiDeclaration: generateApiDeclaration(generated),
+    });
+  } catch (error) { next(error); }
+});
 
-/**
- * Helper to build a JSON response with consistent headers.
- */
-function jsonResponse(
-  data: unknown,
-  status: number,
-  extraHeaders: Record<string, string> = {}
-): Response {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      ...extraHeaders,
-    },
-  });
-}
+app.post("/api/chat", async (request, response, next) => {
+  try {
+    const message = request.body?.message;
+    if (typeof message !== "string" || !message.trim()) {
+      response.status(400).json({ error: "Missing 'message' field in request body" });
+      return;
+    }
+    if (!env.OPENAI_API_KEY || env.OPENAI_API_KEY === "sk-your-key-here") {
+      response.status(500).json({ error: "OPENAI_API_KEY not configured" });
+      return;
+    }
+    const accessToken = await accessTokenForRequest(request);
+    if (!accessToken) {
+      response.status(401).json({ error: "Connect your INDmoney account before chatting.", loginUrl: "/auth/indmoney/connect" });
+      return;
+    }
+    const agentResponse = await runAgent(message, env, accessToken);
+    response.status(agentResponse.status).type(agentResponse.headers.get("content-type") ?? "text/plain");
+    response.send(await agentResponse.text());
+  } catch (error) { next(error); }
+});
+
+app.use(express.static(new URL("./public", import.meta.url).pathname, { extensions: ["html"] }));
+app.use((_request, response) => response.status(404).json({ error: "Not found" }));
+app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+  console.error("Unhandled server error:", error);
+  response.status(500).json({ error: "Internal server error", details: error instanceof Error ? error.message : String(error) });
+});
+
+const port = Number(process.env.PORT ?? 8080);
+app.listen(port, "0.0.0.0", () => console.log(`Code Mode Agent listening on ${port}`));
