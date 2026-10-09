@@ -10,6 +10,7 @@ import os
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -37,13 +38,18 @@ MAX_HISTORY_MESSAGE_CHARS = 12_000
 MAX_CHATS_PER_SESSION = 50
 PUBLIC_DIR = Path(__file__).resolve().parent.parent / "src" / "public"
 
-db = firestore.Client()
 app = FastAPI(title="Code Mode Agent", docs_url=None, redoc_url=None)
 
 
 class ChatRequest(BaseModel):
     message: str
     chatId: str
+
+
+@lru_cache(maxsize=1)
+def get_db() -> firestore.Client:
+    """Create Firestore on demand so health/static routes work without local ADC."""
+    return firestore.Client()
 
 
 def random_token() -> str:
@@ -55,7 +61,7 @@ def session_id(request: Request) -> str | None:
 
 
 def session_ref(sid: str):
-    return db.collection(SESSION_COLLECTION).document(sid)
+    return get_db().collection(SESSION_COLLECTION).document(sid)
 
 
 def chat_collection(sid: str):
@@ -224,7 +230,7 @@ async def disconnect_indmoney(request: Request):
             page = list(chats.limit(400).stream())
             if not page:
                 break
-            batch = db.batch()
+            batch = get_db().batch()
             for document in page:
                 batch.delete(document.reference)
             batch.commit()
