@@ -828,7 +828,7 @@ function setStatus(state, label) {
   statusText.textContent = label;
 }
 
-/* ── Load MCP tools from /api/tools ─────────────────────────────────── */
+/* ── Load this signed-in user's conversations ───────────────────────── */
 async function loadChats() {
   try {
     const response = await fetch('/api/chats');
