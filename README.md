@@ -1,11 +1,11 @@
 # Code Mode Agent
 
-An AI agent that connects to INDmoney's MCP server and exposes its tools directly to the model. The website is an installable Progressive Web App (PWA).
+An AI agent written in Python that connects to INDmoney's MCP server and exposes its tools directly to the model. The website is an installable Progressive Web App (PWA).
 
 ## Hosting layout
 
 - **Firebase Hosting** serves the website, PWA manifest, service worker, and icon.
-- **Cloud Run** handles INDmoney OAuth, MCP requests, and OpenAI requests.
+- **Cloud Run** runs the FastAPI Python backend and handles INDmoney OAuth, MCP requests, and OpenAI requests.
 - **Cloud Firestore** stores per-login OAuth sessions, refresh tokens, and that session's recent chat history.
 - Hosting rewrites `/api/**` and `/auth/**` to the Cloud Run service so the site and API share one origin. That keeps OAuth cookies same-site.
 
@@ -15,7 +15,7 @@ INDmoney OAuth is the app login. Each login gets a random, HTTP-only session coo
 
 ## Prerequisites
 
-- Node.js 22+
+- Python 3.12+
 - A Firebase project with billing enabled (Blaze)
 - `firebase-tools` and the Google Cloud CLI (`gcloud`)
 - An OpenAI API key
@@ -24,7 +24,9 @@ INDmoney OAuth is the app login. Each login gets a random, HTTP-only session coo
 ## Local development
 
 ```bash
-npm ci
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 cp .env.example .env
 ```
 
@@ -33,7 +35,8 @@ Add your OpenAI key to `.env`, set `APP_ORIGIN=http://localhost:8080`, and authe
 ```bash
 gcloud auth application-default login
 gcloud config set project YOUR_FIREBASE_PROJECT_ID
-npm run dev
+set -a; source .env; set +a
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
 ```
 
 The web app is available at `http://localhost:8080`. Sign in to INDmoney in the app before asking questions about account data.
@@ -102,11 +105,12 @@ The website is already configured as a PWA. A store-ready Android package still 
 ## Project structure
 
 ```text
-src/
-  index.ts             Express API, INDmoney OAuth, Firestore session storage
-  agent.ts             AI loop and MCP tool proxy
-  mcp-to-ts.ts         MCP schema fetcher and TypeScript API generator
-  public/              Firebase Hosting website and PWA assets
+app/
+  main.py              FastAPI routes, OAuth, Firestore chat storage
+  agent.py             OpenAI tool-call loop and conversation context
+  mcp_client.py        MCP Streamable HTTP discovery and tool calls
+src/public/            Firebase Hosting website and PWA assets
 firebase.json          Static hosting and same-origin Cloud Run rewrites
-Dockerfile             Cloud Run container
+requirements.txt       Python runtime dependencies
+Dockerfile             Python Cloud Run container
 ```
