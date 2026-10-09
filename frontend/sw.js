@@ -1,5 +1,5 @@
-const CACHE_NAME = 'code-mode-shell-v1';
-const APP_SHELL = ['/'];
+const CACHE_NAME = 'code-mode-shell-v3';
+const APP_SHELL = ['/', '/css/app.css', '/js/app.js', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
