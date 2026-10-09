@@ -1,4 +1,4 @@
-"""FastAPI application for OAuth, private chat history, and INDmoney MCP."""
+"""Local FastAPI app for INDmoney OAuth, MCP, and private chat history."""
 
 from __future__ import annotations
 
@@ -8,18 +8,16 @@ import json
 import logging
 import os
 import secrets
+import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from google.cloud import firestore
 from pydantic import BaseModel
 
 from .agent import run_agent
@@ -31,12 +29,13 @@ logger = logging.getLogger("codemode")
 MCP_RESOURCE = os.getenv("MCP_SERVER_URL", "https://mcp.indmoney.com/mcp")
 MCP_RESOURCE_METADATA = "https://mcp.indmoney.com/.well-known/oauth-protected-resource/mcp"
 SESSION_COOKIE = "indmoney_session"
-SESSION_COLLECTION = "indmoney_sessions"
 SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 MAX_HISTORY_MESSAGES = 20
 MAX_HISTORY_MESSAGE_CHARS = 12_000
 MAX_CHATS_PER_SESSION = 50
-PUBLIC_DIR = Path(__file__).resolve().parent.parent / "src" / "public"
+PUBLIC_DIR = Path(__file__).resolve().parent.parent / "frontend"
+DATA_DIR = Path(os.getenv("APP_DATA_DIR", Path(__file__).resolve().parent.parent / ".data"))
+DATABASE_PATH = DATA_DIR / "codemode.sqlite3"
 
 app = FastAPI(title="Code Mode Agent", docs_url=None, redoc_url=None)
 
@@ -46,10 +45,42 @@ class ChatRequest(BaseModel):
     chatId: str
 
 
-@lru_cache(maxsize=1)
-def get_db() -> firestore.Client:
-    """Create Firestore on demand so health/static routes work without local ADC."""
-    return firestore.Client()
+def connect_db() -> sqlite3.Connection:
+    DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    connection = sqlite3.connect(DATABASE_PATH, timeout=30)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA journal_mode = WAL")
+    return connection
+
+
+def initialize_db() -> None:
+    with connect_db() as connection:
+        connection.executescript("""
+            CREATE TABLE IF NOT EXISTS oauth_sessions (
+                id TEXT PRIMARY KEY,
+                data TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chats (
+                id TEXT NOT NULL,
+                session_id TEXT NOT NULL REFERENCES oauth_sessions(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                messages TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                PRIMARY KEY (session_id, id)
+            );
+            CREATE INDEX IF NOT EXISTS chats_by_session_update
+                ON chats(session_id, updated_at DESC);
+        """)
+    try:
+        os.chmod(DATABASE_PATH, 0o600)
+    except OSError:
+        logger.warning("Could not restrict local database file permissions")
+
+
+initialize_db()
 
 
 def random_token() -> str:
@@ -60,32 +91,26 @@ def session_id(request: Request) -> str | None:
     return request.cookies.get(SESSION_COOKIE)
 
 
-def session_ref(sid: str):
-    return get_db().collection(SESSION_COLLECTION).document(sid)
-
-
-def chat_collection(sid: str):
-    return session_ref(sid).collection("chats")
-
-
 def get_session(sid: str) -> dict[str, Any]:
-    ref = session_ref(sid)
-    snapshot = ref.get()
-    if not snapshot.exists:
-        return {}
-    stored = snapshot.to_dict() or {}
-    updated = stored.get("updatedAt", 0)
-    if updated and time.time() * 1000 - updated > SESSION_MAX_AGE_SECONDS * 1000:
-        ref.delete()
-        return {}
-    return stored
+    with connect_db() as connection:
+        row = connection.execute("SELECT data, updated_at FROM oauth_sessions WHERE id = ?", (sid,)).fetchone()
+        if row is None:
+            return {}
+        if int(time.time() * 1000) - row["updated_at"] > SESSION_MAX_AGE_SECONDS * 1000:
+            connection.execute("DELETE FROM oauth_sessions WHERE id = ?", (sid,))
+            return {}
+        return json.loads(row["data"])
 
 
 def save_session(sid: str, values: dict[str, Any]) -> None:
-    values = dict(values)
-    values["updatedAt"] = int(time.time() * 1000)
-    values["sessionExpiresAt"] = datetime.now(timezone.utc) + timedelta(seconds=SESSION_MAX_AGE_SECONDS)
-    session_ref(sid).set(values)
+    now = int(time.time() * 1000)
+    stored = {**values, "updatedAt": now, "sessionExpiresAt": now + SESSION_MAX_AGE_SECONDS * 1000}
+    with connect_db() as connection:
+        connection.execute(
+            "INSERT INTO oauth_sessions(id, data, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
+            (sid, json.dumps(stored), now),
+        )
 
 
 def request_origin(request: Request) -> str:
@@ -225,16 +250,9 @@ async def disconnect_indmoney(request: Request):
                     })
             except Exception:
                 logger.exception("INDmoney token revocation failed")
-        chats = chat_collection(sid)
-        while True:
-            page = list(chats.limit(400).stream())
-            if not page:
-                break
-            batch = get_db().batch()
-            for document in page:
-                batch.delete(document.reference)
-            batch.commit()
-        session_ref(sid).delete()
+        with connect_db() as connection:
+            connection.execute("DELETE FROM chats WHERE session_id = ?", (sid,))
+            connection.execute("DELETE FROM oauth_sessions WHERE id = ?", (sid,))
     response = JSONResponse({"connected": False})
     response.delete_cookie(SESSION_COOKIE, httponly=True, secure=is_secure_request(request), samesite="lax", path="/")
     return response
@@ -245,8 +263,12 @@ async def list_chats(request: Request):
     sid, token = await access_token(request)
     if not sid or not token:
         return auth_error("Sign in with INDmoney to access your private chat history.")
-    docs = chat_collection(sid).order_by("updatedAt", direction=firestore.Query.DESCENDING).limit(MAX_CHATS_PER_SESSION).stream()
-    return {"chats": [{"id": doc.id, "title": doc.get("title"), "updatedAt": doc.get("updatedAt")} for doc in docs]}
+    with connect_db() as connection:
+        rows = connection.execute(
+            "SELECT id, title, updated_at FROM chats WHERE session_id = ? ORDER BY updated_at DESC LIMIT ?",
+            (sid, MAX_CHATS_PER_SESSION),
+        ).fetchall()
+    return {"chats": [{"id": row["id"], "title": row["title"], "updatedAt": row["updated_at"]} for row in rows]}
 
 
 @app.post("/api/chats", status_code=201)
@@ -254,14 +276,32 @@ async def create_chat(request: Request):
     sid, token = await access_token(request)
     if not sid or not token:
         return auth_error("Sign in with INDmoney to create a private chat.")
-    chats = chat_collection(sid)
-    existing = list(chats.order_by("updatedAt", direction=firestore.Query.ASCENDING).limit(MAX_CHATS_PER_SESSION).stream())
-    if len(existing) >= MAX_CHATS_PER_SESSION:
-        existing[0].reference.delete()
+    now = int(time.time() * 1000)
     identifier = random_token()
-    chat = {"title": "New chat", "messages": [], "updatedAt": int(time.time() * 1000), "sessionExpiresAt": datetime.now(timezone.utc) + timedelta(seconds=SESSION_MAX_AGE_SECONDS)}
-    chats.document(identifier).create(chat)
-    return {"id": identifier, **chat}
+    expires_at = now + SESSION_MAX_AGE_SECONDS * 1000
+    with connect_db() as connection:
+        existing = connection.execute("SELECT COUNT(*) AS n FROM chats WHERE session_id = ?", (sid,)).fetchone()["n"]
+        if existing >= MAX_CHATS_PER_SESSION:
+            connection.execute(
+                "DELETE FROM chats WHERE session_id = ? AND id = "
+                "(SELECT id FROM chats WHERE session_id = ? ORDER BY updated_at ASC LIMIT 1)", (sid, sid),
+            )
+        connection.execute(
+            "INSERT INTO chats(id, session_id, title, messages, updated_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (identifier, sid, "New chat", "[]", now, expires_at),
+        )
+    return {"id": identifier, "title": "New chat", "messages": [], "updatedAt": now, "sessionExpiresAt": expires_at}
+
+
+def read_chat(sid: str, chat_id: str) -> dict[str, Any] | None:
+    with connect_db() as connection:
+        row = connection.execute(
+            "SELECT id, title, messages, updated_at, expires_at FROM chats WHERE session_id = ? AND id = ?",
+            (sid, chat_id),
+        ).fetchone()
+    if row is None:
+        return None
+    return {"id": row["id"], "title": row["title"], "messages": json.loads(row["messages"]), "updatedAt": row["updated_at"], "sessionExpiresAt": row["expires_at"]}
 
 
 @app.get("/api/chats/{chat_id}")
@@ -269,10 +309,10 @@ async def get_chat(chat_id: str, request: Request):
     sid, token = await access_token(request)
     if not sid or not token:
         return auth_error("Sign in with INDmoney to access your chats.")
-    snapshot = chat_collection(sid).document(chat_id).get()
-    if not snapshot.exists:
+    chat = read_chat(sid, chat_id)
+    if chat is None:
         return JSONResponse({"error": "Chat not found."}, status_code=404)
-    return {"id": snapshot.id, **(snapshot.to_dict() or {})}
+    return chat
 
 
 @app.delete("/api/chats/{chat_id}")
@@ -280,10 +320,10 @@ async def delete_chat(chat_id: str, request: Request):
     sid, token = await access_token(request)
     if not sid or not token:
         return auth_error("Sign in with INDmoney to delete your chats.")
-    ref = chat_collection(sid).document(chat_id)
-    if not ref.get().exists:
+    with connect_db() as connection:
+        result = connection.execute("DELETE FROM chats WHERE session_id = ? AND id = ?", (sid, chat_id))
+    if result.rowcount == 0:
         return JSONResponse({"error": "Chat not found."}, status_code=404)
-    ref.delete()
     return {"deleted": True}
 
 
@@ -311,30 +351,29 @@ async def chat(body: ChatRequest, request: Request):
     sid, token = await access_token(request)
     if not sid or not token:
         return auth_error("Connect your INDmoney account before chatting.")
-    ref = chat_collection(sid).document(body.chatId)
-    snapshot = ref.get()
-    if not snapshot.exists:
+    data = read_chat(sid, body.chatId)
+    if data is None:
         return JSONResponse({"error": "Chat not found in this account."}, status_code=404)
-    data = snapshot.to_dict() or {}
     try:
         answer = await run_agent(message, api_key, MCP_RESOURCE, token, data.get("messages", []))
     except Exception as exc:
         logger.exception("Chat agent request failed")
         details = str(exc)
-        status = 502
-        if details.startswith("OpenAI request failed: HTTP 401"):
-            status = 502
-        return JSONResponse({"error": "INDmoney data request failed" if "INDmoney" in details or "MCP" in details else "Agent request failed", "details": details}, status_code=status)
+        error = "INDmoney data request failed" if "INDmoney" in details or "MCP" in details else "Agent request failed"
+        return JSONResponse({"error": error, "details": details}, status_code=502)
     if answer.strip():
-        now = datetime.now(timezone.utc) + timedelta(seconds=SESSION_MAX_AGE_SECONDS)
+        now = int(time.time() * 1000)
         messages = list(data.get("messages", []))
         messages += [{"role": "user", "content": message[:MAX_HISTORY_MESSAGE_CHARS]}, {"role": "assistant", "content": answer[:MAX_HISTORY_MESSAGE_CHARS]}]
         messages = messages[-MAX_HISTORY_MESSAGES:]
         title = data.get("title", "New chat")
         if title == "New chat":
             title = message[:60]
-        ref.update({"messages": messages, "title": title, "updatedAt": int(time.time() * 1000), "sessionExpiresAt": now})
-        session_ref(sid).update({"sessionExpiresAt": now, "updatedAt": int(time.time() * 1000)})
+        with connect_db() as connection:
+            connection.execute(
+                "UPDATE chats SET messages = ?, title = ?, updated_at = ?, expires_at = ? WHERE session_id = ? AND id = ?",
+                (json.dumps(messages), title, now, now + SESSION_MAX_AGE_SECONDS * 1000, sid, body.chatId),
+            )
     return PlainTextResponse(answer)
 
 

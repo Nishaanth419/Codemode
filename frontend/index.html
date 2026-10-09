@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#f5f7f6" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="description" content="A private assistant for understanding your INDmoney portfolio." />
+  <title>Code Mode · Portfolio assistant</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <link rel="stylesheet" href="/css/app.css" />
+  <script src="/js/app.js" defer></script>
+</head>
+<body>
+  <header id="topbar">
+    <a class="brand" href="/" aria-label="Code Mode home">
+      <span class="logo-mark" aria-hidden="true">C</span>
+      <span class="brand-copy">
+        <span class="logo-text">Code Mode</span>
+        <span class="logo-sub">PORTFOLIO ASSISTANT</span>
+      </span>
+    </a>
+    <div class="topbar-spacer"></div>
+    <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Switch to dark mode" title="Switch to dark mode">
+      <svg id="theme-toggle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.2 15.7A8.5 8.5 0 0 1 8.3 3.8 8.6 8.6 0 1 0 20.2 15.7Z" /></svg>
+    </button>
+    <div id="status-badge" aria-live="polite">
+      <span id="status-dot" class="status-dot"></span>
+      <span id="status-text">Connecting…</span>
+    </div>
+    <button id="auth-button" class="auth-button" type="button">Connect INDmoney</button>
+  </header>
+
+  <main>
+    <section id="login-screen" aria-labelledby="login-title">
+      <div class="login-card">
+        <div class="login-art" aria-hidden="true">
+          <div class="login-art-orbit orbit-one"></div>
+          <div class="login-art-orbit orbit-two"></div>
+          <div class="login-art-mark">C</div>
+          <div class="login-art-caption">YOUR MONEY, IN CONTEXT</div>
+        </div>
+        <div class="login-content">
+          <p class="eyebrow">PRIVATE PORTFOLIO WORKSPACE</p>
+          <h1 class="login-title" id="login-title">Your portfolio, understood.</h1>
+          <p class="login-copy">Connect your INDmoney account to ask questions, explore your holdings, and pick up where you left off.</p>
+          <button id="login-cta" class="primary-button" type="button">
+            <span>Continue with INDmoney</span>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h12M10 4l6 6-6 6" /></svg>
+          </button>
+          <p class="privacy-note"><span class="privacy-lock" aria-hidden="true">◈</span> Your account data stays in your local app session.</p>
+        </div>
+      </div>
+    </section>
+
+    <div id="main" style="display:none">
+      <aside id="sidebar" aria-label="Chat history">
+        <div class="sidebar-header">
+          <div>
+            <p class="eyebrow">WORKSPACE</p>
+            <h2 class="sidebar-title">Your chats</h2>
+          </div>
+          <button id="new-chat-button" class="new-chat-button" type="button" aria-label="Start a new chat" title="Start a new chat">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12" /></svg>
+            <span>New chat</span>
+          </button>
+        </div>
+        <div class="history-caption">Your recent conversations</div>
+        <div id="chat-list"></div>
+        <div class="sidebar-footer">
+          <span class="local-dot" aria-hidden="true"></span>
+          <span>Saved on this device</span>
+        </div>
+      </aside>
+
+      <section id="chat-area" aria-label="Portfolio assistant chat">
+        <div class="chat-toolbar">
+          <div class="chat-toolbar-title">
+            <span class="toolbar-icon" aria-hidden="true">✳</span>
+            <div>
+              <strong>Portfolio assistant</strong>
+              <span>Connected to INDmoney</span>
+            </div>
+          </div>
+          <span class="secure-pill"><span class="secure-dot"></span> Private session</span>
+        </div>
+
+        <div id="empty-state">
+          <div class="welcome-mark" aria-hidden="true">
+            <svg viewBox="0 0 48 48"><path d="M10 33.5 20.5 23 27 29.5 38 18.5M29 18.5h9v9" /></svg>
+          </div>
+          <p class="eyebrow welcome-eyebrow">YOUR FINANCIAL PICTURE, AT A GLANCE</p>
+          <h1 class="empty-title">What would you like to know?</h1>
+          <p class="empty-sub">Ask about your investments in plain language. Your assistant can compare holdings, explain allocations, and visualize your portfolio.</p>
+          <div class="example-prompts" aria-label="Suggested questions">
+            <button class="example-prompt" data-prompt="Summarize my portfolio allocation by asset class." type="button">
+              <span class="prompt-icon prompt-green" aria-hidden="true">◒</span>
+              <span><strong>Portfolio allocation</strong><small>See how your investments are distributed</small></span>
+              <span class="prompt-arrow" aria-hidden="true">↗</span>
+            </button>
+            <button class="example-prompt" data-prompt="Show my top holdings by current value and explain the largest concentration." type="button">
+              <span class="prompt-icon prompt-blue" aria-hidden="true">▤</span>
+              <span><strong>Top holdings</strong><small>Find your largest positions and exposure</small></span>
+              <span class="prompt-arrow" aria-hidden="true">↗</span>
+            </button>
+            <button class="example-prompt" data-prompt="List my active SIPs and their monthly amounts." type="button">
+              <span class="prompt-icon prompt-amber" aria-hidden="true">↗</span>
+              <span><strong>Active SIPs</strong><small>Review your recurring investments</small></span>
+              <span class="prompt-arrow" aria-hidden="true">↗</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="messages" aria-live="polite"></div>
+
+        <div id="input-area">
+          <div id="input-wrap">
+            <textarea id="user-input" rows="1" placeholder="Ask about your portfolio…" aria-label="Message input"></textarea>
+            <button id="send-btn" type="button" title="Send message (Enter)" aria-label="Send message">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12 20 4l-5 16-3-7-8-1Z" /><path d="m12 13 8-9" /></svg>
+            </button>
+          </div>
+          <div id="input-hint">Press <kbd>Enter</kbd> to send <span>·</span> <kbd>Shift + Enter</kbd> for a new line</div>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

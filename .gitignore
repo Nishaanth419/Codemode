@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .wrangler/
+.data/
 .venv/
 __pycache__/
 *.py[cod]
