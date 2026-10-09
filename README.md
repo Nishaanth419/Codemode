@@ -30,16 +30,15 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Add your OpenAI key to `.env`, set `APP_ORIGIN=http://localhost:8080`, and authenticate application-default credentials for a Firebase project with Firestore enabled:
+Add your OpenAI key and Firebase project ID to `.env`. Install the Google Cloud CLI, run `gcloud auth application-default login`, and configure your project. Docker Compose mounts the ADC file into the backend container for Firestore access:
 
 ```bash
 gcloud auth application-default login
 gcloud config set project YOUR_FIREBASE_PROJECT_ID
-set -a; source .env; set +a
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
+docker compose up --build
 ```
 
-The web app is available at `http://localhost:8080`. Sign in to INDmoney in the app before asking questions about account data.
+The web app is available at the `APP_ORIGIN` in `.env` (default `http://localhost:8003`). Sign in to INDmoney in the app before asking questions about account data.
 
 ## Deploy to Firebase and Cloud Run
 
