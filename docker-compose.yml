@@ -2,6 +2,11 @@ services:
   mcp-agent:
     build: .
     ports:
-      - "8080:8080"
+      - "8003:8080"
     env_file:
       - .env
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /root/.config/gcloud/application_default_credentials.json
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
+    volumes:
+      - ${HOME}/.config/gcloud/application_default_credentials.json:/root/.config/gcloud/application_default_credentials.json:ro

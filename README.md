@@ -1,19 +1,21 @@
 # Code Mode Agent
 
-An AI agent that connects to INDmoney's MCP server and exposes its tools directly to the model. The website is an installable Progressive Web App (PWA).
+An AI agent written in Python that connects to INDmoney's MCP server and exposes its tools directly to the model. The website is an installable Progressive Web App (PWA).
 
 ## Hosting layout
 
 - **Firebase Hosting** serves the website, PWA manifest, service worker, and icon.
-- **Cloud Run** handles INDmoney OAuth, MCP requests, and OpenAI requests.
-- **Cloud Firestore** stores short-lived per-browser OAuth sessions and refresh tokens.
+- **Cloud Run** runs the FastAPI Python backend and handles INDmoney OAuth, MCP requests, and OpenAI requests.
+- **Cloud Firestore** stores per-login OAuth sessions, refresh tokens, and that session's recent chat history.
 - Hosting rewrites `/api/**` and `/auth/**` to the Cloud Run service so the site and API share one origin. That keeps OAuth cookies same-site.
 
 The agent discovers MCP tool schemas at request time, exposes each tool directly to the model, and proxies tool calls with the signed-in user's OAuth token. OpenAI keys and OAuth tokens stay in the Cloud Run service. See [Firebase Hosting rewrites to Cloud Run](https://firebase.google.com/docs/hosting/cloud-run).
 
+INDmoney OAuth is the app login. Each login gets a random, HTTP-only session cookie and a separate Firestore document. Conversations are stored as child records under that session, so each signed-in account sees only its own chats. Each chat keeps the latest 20 user/assistant messages, restores them after reload, and sends them to the model as context. Users can start, select, and delete chats. Disconnecting deletes the session and its chats. Portfolio requests always use the token held by that same session.
+
 ## Prerequisites
 
-- Node.js 22+
+- Python 3.12+
 - A Firebase project with billing enabled (Blaze)
 - `firebase-tools` and the Google Cloud CLI (`gcloud`)
 - An OpenAI API key
@@ -22,19 +24,21 @@ The agent discovers MCP tool schemas at request time, exposes each tool directly
 ## Local development
 
 ```bash
-npm ci
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Add your OpenAI key to `.env`, set `APP_ORIGIN=http://localhost:8080`, and authenticate application-default credentials for a Firebase project with Firestore enabled:
+Add your OpenAI key and Firebase project ID to `.env`. Install the Google Cloud CLI, run `gcloud auth application-default login`, and configure your project. Docker Compose mounts the ADC file into the backend container for Firestore access:
 
 ```bash
 gcloud auth application-default login
 gcloud config set project YOUR_FIREBASE_PROJECT_ID
-npm run dev
+docker compose up --build
 ```
 
-The web app is available at `http://localhost:8080`. Sign in to INDmoney in the app before asking questions about account data.
+The web app is available at the `APP_ORIGIN` in `.env` (default `http://localhost:8003`). Sign in to INDmoney in the app before asking questions about account data.
 
 ## Deploy to Firebase and Cloud Run
 
@@ -49,11 +53,14 @@ The web app is available at `http://localhost:8080`. Sign in to INDmoney in the 
 
    If the project already has a Firestore database, keep its current location; do not create another database just for this app.
 
-   Configure automatic cleanup for expired OAuth session documents:
+   Configure automatic cleanup for expired OAuth session and chat documents:
 
    ```bash
    gcloud firestore fields ttls update sessionExpiresAt \
      --collection-group=indmoney_sessions \
+     --enable-ttl
+   gcloud firestore fields ttls update sessionExpiresAt \
+     --collection-group=chats \
      --enable-ttl
    ```
 
@@ -97,11 +104,12 @@ The website is already configured as a PWA. A store-ready Android package still 
 ## Project structure
 
 ```text
-src/
-  index.ts             Express API, INDmoney OAuth, Firestore session storage
-  agent.ts             AI loop and MCP tool proxy
-  mcp-to-ts.ts         MCP schema fetcher and TypeScript API generator
-  public/              Firebase Hosting website and PWA assets
+app/
+  main.py              FastAPI routes, OAuth, Firestore chat storage
+  agent.py             OpenAI tool-call loop and conversation context
+  mcp_client.py        MCP Streamable HTTP discovery and tool calls
+src/public/            Firebase Hosting website and PWA assets
 firebase.json          Static hosting and same-origin Cloud Run rewrites
-Dockerfile             Cloud Run container
+requirements.txt       Python runtime dependencies
+Dockerfile             Python Cloud Run container
 ```
