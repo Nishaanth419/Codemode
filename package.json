@@ -1,0 +1,23 @@
+{
+  "name": "agentos",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "workers/agent",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspaces --if-present",
+    "dev:agent": "npm run dev -w workers/agent",
+    "dev:web": "npm run dev -w apps/web",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm test --workspaces --if-present",
+    "test:smoke": "npm run test:smoke -w workers/agent",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "sandbox:build": "docker build -t agentos-sandbox:latest sandbox"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}

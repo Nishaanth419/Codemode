@@ -1,0 +1,79 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+
+/* AgentOS design tokens: Obsidian / Electric Lime / Off-white */
+@theme {
+  --color-obsidian: #111310;
+  --color-obsidian-950: #0b0c0a;
+  --color-surface: #171915;
+  --color-surface-2: #1d201b;
+  --color-surface-3: #252922;
+  --color-line: #2a2e27;
+  --color-line-strong: #3a3f36;
+  --color-lime: #d7ff64;
+  --color-lime-dim: #a9c94e;
+  --color-paper: #f5f5f0;
+  --color-muted: #9a9d92;
+  --color-faint: #6b6e64;
+  --color-warn: #ffb547;
+  --color-danger: #ff6b5e;
+  --color-info: #7cc7ff;
+
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --animate-pulse-dot: pulse-dot 1.6s ease-in-out infinite;
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: .45; transform: scale(.85); }
+  }
+}
+
+:root {
+  color-scheme: dark;
+  --background: #111310;
+  --foreground: #f5f5f0;
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: var(--color-obsidian);
+  color: var(--color-paper);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection { background: color-mix(in oklab, var(--color-lime) 35%, transparent); color: var(--color-paper); }
+
+/* Subtle grid texture for the workspace canvas */
+.bg-grid {
+  background-image:
+    linear-gradient(to right, color-mix(in oklab, var(--color-line) 45%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in oklab, var(--color-line) 45%, transparent) 1px, transparent 1px);
+  background-size: 28px 28px;
+  mask-image: radial-gradient(ellipse at 50% 0%, black 0%, transparent 70%);
+}
+
+/* Markdown answers */
+.prose-agent { line-height: 1.65; font-size: 0.925rem; }
+.prose-agent p { margin: 0.5em 0; }
+.prose-agent h1, .prose-agent h2, .prose-agent h3 { font-weight: 600; margin: 1em 0 0.4em; letter-spacing: -0.01em; }
+.prose-agent h1 { font-size: 1.2rem; } .prose-agent h2 { font-size: 1.08rem; } .prose-agent h3 { font-size: 1rem; }
+.prose-agent ul, .prose-agent ol { padding-left: 1.3em; margin: 0.4em 0; }
+.prose-agent ul { list-style: disc; } .prose-agent ol { list-style: decimal; }
+.prose-agent li::marker { color: var(--color-lime-dim); }
+.prose-agent strong { color: #fff; font-weight: 600; }
+.prose-agent a { color: var(--color-lime); text-decoration: underline; text-underline-offset: 3px; }
+.prose-agent code { font-family: var(--font-mono); font-size: 0.82em; background: var(--color-surface-3); padding: 0.12em 0.4em; border-radius: 5px; }
+.prose-agent pre { background: var(--color-obsidian-950); border: 1px solid var(--color-line); border-radius: 10px; padding: 0.8em 1em; overflow-x: auto; margin: 0.7em 0; }
+.prose-agent pre code { background: none; padding: 0; font-size: 0.8rem; }
+.prose-agent table { border-collapse: collapse; margin: 0.7em 0; font-size: 0.85rem; display: block; overflow-x: auto; }
+.prose-agent th, .prose-agent td { border: 1px solid var(--color-line); padding: 0.35em 0.7em; text-align: left; }
+.prose-agent th { background: var(--color-surface-2); font-weight: 600; }
+.prose-agent blockquote { border-left: 2px solid var(--color-lime-dim); padding-left: 0.9em; color: var(--color-muted); }
+
+/* Thin scrollbars */
+* { scrollbar-width: thin; scrollbar-color: var(--color-line-strong) transparent; }

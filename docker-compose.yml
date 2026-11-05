@@ -1,0 +1,58 @@
+# AgentOS — full stack.
+#   docker compose up --build            → http://localhost:8080  (WEB_PORT=… to change)
+#   docker compose --profile ollama up   → also runs a local Ollama container
+#
+# The agent starts sandbox containers as *siblings* via the host Docker socket.
+# Mounting the socket gives the agent container control over the host's Docker daemon:
+# acceptable for local development, not for multi-tenant hosting.
+services:
+  sandbox-image:
+    # Builds agentos-sandbox:latest, used for every Python / Node / shell / Code Mode container.
+    build: ./sandbox
+    image: agentos-sandbox:latest
+    command: ["true"]
+    restart: "no"
+
+  agent:
+    build:
+      context: .
+      dockerfile: workers/agent/Dockerfile
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      DATA_DIR: /data
+      # Same absolute path inside and outside the container so sandbox bind mounts resolve on the host.
+      WORKSPACE_HOST_DIR: ${PWD}/.data
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL_COMPOSE:-http://host.docker.internal:11434/v1}
+      CORS_ORIGIN: http://localhost:${WEB_PORT:-8080}
+    volumes:
+      - ./.data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      sandbox-image:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8787:8787"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    depends_on: [agent]
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8080}:80"
+    restart: unless-stopped
+
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:latest
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+
+volumes:
+  ollama:
