@@ -106,7 +106,7 @@ export class ProviderRouter {
   }
 
   generate(request: GenerateRequest, ctx: RouterCallContext = {}): Promise<GenerateResult> {
-    return this.run(ctx, (p) => p.generate({ ...request, signal: ctx.signal ?? request.signal }), (r) => r);
+    return this.run(ctx, async (p) => requireOutput(p, await p.generate({ ...request, signal: ctx.signal ?? request.signal })), (r) => r);
   }
 
   generateStructured<T>(request: StructuredRequest<T>, ctx: RouterCallContext = {}): Promise<StructuredResult<T>> {
@@ -130,7 +130,7 @@ export class ProviderRouter {
               emitted = true;
               ctx.onTextDelta?.(chunk.text, p.name);
             } else {
-              return chunk.result;
+              return requireOutput(p, chunk.result);
             }
           }
           throw new ProviderError({ provider: p.name, kind: "invalid_response", message: `${PROVIDER_LABELS[p.name]} stream ended without a result` });
@@ -269,4 +269,18 @@ export class ProviderRouter {
       retryAt
     );
   }
+}
+
+/**
+ * A completion with neither text nor a tool call is never a usable answer. Reasoning models
+ * occasionally spend their whole output on reasoning and stop. Treat it as a transient
+ * failure, so it is retried and then failed over like any malformed generation.
+ */
+function requireOutput(provider: LLMProvider, result: GenerateResult): GenerateResult {
+  if (result.text.trim() || result.toolCalls.length) return result;
+  throw new ProviderError({
+    provider: provider.name,
+    kind: "empty_response",
+    message: `${PROVIDER_LABELS[provider.name]} returned no text and no tool call (finish reason: ${result.finishReason})`
+  });
 }

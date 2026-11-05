@@ -10,6 +10,7 @@
  *   server_error       yes (bounded)                 yes
  *   timeout / network  yes (bounded)                 yes
  *   generation_failed  yes (bounded)                 yes   (e.g. Groq `tool_use_failed`)
+ *   empty_response     yes (bounded)                 yes   (no text and no tool call)
  *   invalid_response   yes (bounded)                 yes
  *   auth               no                            NO  (invalid key = configuration error)
  *   bad_request        no                            NO  (malformed request)
@@ -28,6 +29,7 @@ export type ProviderErrorKind =
   | "timeout"
   | "network"
   | "generation_failed"
+  | "empty_response"
   | "invalid_response"
   | "auth"
   | "bad_request"
@@ -42,6 +44,7 @@ const TRANSIENT: ReadonlySet<ProviderErrorKind> = new Set([
   "timeout",
   "network",
   "generation_failed",
+  "empty_response",
   "invalid_response"
 ]);
 
@@ -108,6 +111,8 @@ export class ProviderError extends Error {
         return `${label} is unreachable`;
       case "generation_failed":
         return `${label} produced an invalid tool call`;
+      case "empty_response":
+        return `${label} returned an empty response`;
       case "invalid_response":
         return `${label} returned an invalid response`;
       case "auth":

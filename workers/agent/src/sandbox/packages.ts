@@ -10,8 +10,14 @@
  *   the install, and packages land in the session workspace (`/workspace/.packages`),
  *   never in the image or on the host.
  * - npm lifecycle scripts are disabled (`--ignore-scripts`).
+ * - pip installs are binary-only (`--only-binary=:all:`): prebuilt wheels, never source
+ *   builds. Building runs arbitrary setup code and cannot succeed in the sandbox anyway
+ *   (no compiler, noexec /tmp, tight memory), so it is rejected up front with a clear error.
  */
+import fs from "node:fs";
+import path from "node:path";
 import type { DockerSandbox, SandboxRunResult } from "./docker.js";
+import { PACKAGES_DIR } from "./workspace.js";
 
 export type PackageManager = "pip" | "npm";
 
@@ -57,16 +63,30 @@ export class PackageInstaller {
     const spec = version ? (manager === "pip" ? `${name}==${version}` : `${name}@${version}`) : name;
     const argv =
       manager === "pip"
-        ? ["pip", "install", "--no-cache-dir", "--disable-pip-version-check", "--target", "/workspace/.packages/python", spec]
+        ? ["pip", "install", "--no-cache-dir", "--disable-pip-version-check", "--only-binary=:all:", "--target", "/workspace/.packages/python", spec]
         : ["npm", "install", "--no-audit", "--no-fund", "--ignore-scripts", "--prefix", "/workspace/.packages/node", spec];
-    const result = await this.sandbox.run({
-      mountDir,
-      argv,
-      network: "bridge",
-      timeoutMs: 180_000,
-      tmpfsMb: 256,
-      env: { npm_config_cache: "/tmp/.npm" }
-    });
+    // Unpack on disk, not in /tmp: /tmp is a tmpfs whose pages count against the container's
+    // memory limit, and unpacking wheels such as matplotlib + numpy there exceeds 256 MB.
+    const hostTmp = path.join(mountDir, PACKAGES_DIR, ".tmp");
+    fs.mkdirSync(hostTmp, { recursive: true });
+    const tmp = `/workspace/${PACKAGES_DIR}/.tmp`;
+    let result: SandboxRunResult;
+    try {
+      result = await this.sandbox.run({
+        mountDir,
+        argv,
+        network: "bridge",
+        timeoutMs: 180_000,
+        env: { TMPDIR: tmp, npm_config_cache: `${tmp}/npm` }
+      });
+    } finally {
+      fs.rmSync(hostTmp, { recursive: true, force: true });
+    }
+    if (manager === "pip" && result.exitCode !== 0 && /No matching distribution|from versions: none/i.test(result.stderr)) {
+      result.stderr +=
+        `\n[AgentOS] No prebuilt wheel of ${spec} exists for this sandbox's Python and platform. ` +
+        "Source builds are not supported: install without a version pin (latest has wheels) or pick a version that ships wheels.";
+    }
     return { ...result, installed: spec };
   }
 }

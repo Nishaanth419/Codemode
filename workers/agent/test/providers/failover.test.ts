@@ -148,6 +148,24 @@ describe("4. Groq 5xx triggers fallback", () => {
     const { router } = makeRouter(mock);
     expect((await router.generate(baseRequest)).provider).toBe("gemini");
   });
+
+  it("an empty completion (no text, no tool call) is retried, then falls back", async () => {
+    // e.g. a reasoning model that spends its whole output on reasoning and stops.
+    const empty = { kind: "text" as const, text: "" };
+    const mock = new MockLLM().groq(empty, empty, empty).gemini({ kind: "text", text: "4" });
+    const { router, events, onEvent } = makeRouter(mock);
+    const result = await router.stream(baseRequest, { onEvent });
+    expect(result).toMatchObject({ provider: "gemini", text: "4" });
+    expect(mock.calls("groq")).toHaveLength(3);
+    expect(events.find((e) => e.type === "provider.failover")).toMatchObject({ message: "Groq returned an empty response after 3 attempts. Switching to Gemini." });
+  });
+
+  it("an empty completion recovers on the same provider when a retry succeeds", async () => {
+    const mock = new MockLLM().groq({ kind: "text", text: "" }, { kind: "text", text: "4" });
+    const { router } = makeRouter(mock);
+    expect(await router.generate(baseRequest)).toMatchObject({ provider: "groq", text: "4" });
+    expect(mock.calls("gemini")).toHaveLength(0);
+  });
 });
 
 describe("5. Invalid Groq API key does not silently fall back", () => {

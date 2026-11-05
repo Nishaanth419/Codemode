@@ -47,10 +47,16 @@ function toProviders(providersOrFns: ResolvedProvider[] | ToolFns): ResolvedProv
   return Array.isArray(providersOrFns) ? providersOrFns : [{ name: "codemode", fns: providersOrFns }];
 }
 
+/** Default hard cap on an execution's total wall-clock time, including time spent in host tools. */
+export const DEFAULT_MAX_WALL_MS = 5 * 60_000;
+
 /** Shared message handling for both transports. */
 class RuntimeSession {
   readonly logs: string[] = [];
   private readonly fnIndex = new Map<string, Map<string, (...args: unknown[]) => Promise<unknown>>>();
+  private inFlight = 0;
+  private busySince = 0;
+  private toolMs = 0;
 
   constructor(
     providers: ResolvedProvider[],
@@ -59,6 +65,11 @@ class RuntimeSession {
     private readonly maxLogLines = 500
   ) {
     for (const p of providers) this.fnIndex.set(p.name, new Map(Object.entries(p.fns)));
+  }
+
+  /** Wall time during which at least one host tool call was in flight. */
+  toolTimeMs(now = Date.now()): number {
+    return this.toolMs + (this.inFlight > 0 ? now - this.busySince : 0);
   }
 
   namespaces() {
@@ -94,6 +105,15 @@ class RuntimeSession {
   }
 
   private async dispatch(msg: Extract<RuntimeMessage, { type: "tool-call" }>) {
+    if (this.inFlight++ === 0) this.busySince = Date.now();
+    try {
+      await this.dispatchCall(msg);
+    } finally {
+      if (--this.inFlight === 0) this.toolMs += Date.now() - this.busySince;
+    }
+  }
+
+  private async dispatchCall(msg: Extract<RuntimeMessage, { type: "tool-call" }>) {
     const fn = this.fnIndex.get(msg.namespace)?.get(msg.name);
     if (!fn) {
       const available = [...(this.fnIndex.get(msg.namespace)?.keys() ?? [])].join(", ");
@@ -117,9 +137,40 @@ class RuntimeSession {
   }
 }
 
+/**
+ * Arms an execution's timeout and returns a function that disarms it.
+ *
+ * `timeoutMs` limits the program's own run time: wall time minus time spent waiting on host
+ * tools. Host tools have their own limits (a package install may take minutes), so a fast
+ * program that waits on a slow tool is not killed. `maxWallMs` is a hard cap on total wall
+ * time, so a program cannot stay alive indefinitely by keeping tool calls pending.
+ */
+function armDeadline(
+  session: RuntimeSession,
+  opts: { timeoutMs: number; graceMs?: number; maxWallMs: number },
+  onTimeout: (error: string) => void
+): () => void {
+  const started = Date.now();
+  const budget = opts.timeoutMs + (opts.graceMs ?? 0);
+  let timer: ReturnType<typeof setTimeout>;
+  const check = () => {
+    const now = Date.now();
+    const wall = now - started;
+    const program = wall - session.toolTimeMs(now);
+    if (wall >= opts.maxWallMs) return onTimeout(`Execution exceeded the wall-clock limit of ${opts.maxWallMs}ms (time spent in tools included)`);
+    if (program >= budget) return onTimeout(`Execution timed out after ${opts.timeoutMs}ms`);
+    timer = setTimeout(check, Math.max(10, Math.min(budget - program, opts.maxWallMs - wall)));
+  };
+  timer = setTimeout(check, Math.min(budget, opts.maxWallMs));
+  return () => clearTimeout(timer);
+}
+
 export interface LocalWorkerExecutorOptions extends ExecutorHooks {
   runtimePath: string;
+  /** Limit on the program's own run time; time waiting on host tools is not counted. */
   timeoutMs?: number;
+  /** Hard cap on total wall time, tools included. Default 5 minutes. */
+  maxWallMs?: number;
   memoryMb?: number;
 }
 
@@ -145,13 +196,12 @@ export class LocalWorkerExecutor implements Executor {
       const finish = (r: ExecuteResult) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        disarm();
         void worker?.terminate();
         resolve(r);
       };
-      const timer = setTimeout(
-        () => finish({ result: undefined, error: `Execution timed out after ${timeoutMs}ms`, logs: session.logs }),
-        timeoutMs
+      const disarm = armDeadline(session, { timeoutMs, maxWallMs: this.opts.maxWallMs ?? DEFAULT_MAX_WALL_MS }, (error) =>
+        finish({ result: undefined, error, logs: session.logs })
       );
       try {
         worker = new Worker(this.opts.runtimePath, {
@@ -192,7 +242,10 @@ export class LocalWorkerExecutor implements Executor {
 
 export interface DockerExecutorOptions extends ExecutorHooks {
   image: string;
+  /** Limit on the program's own run time; time waiting on host tools is not counted. */
   timeoutMs?: number;
+  /** Hard cap on total wall time, tools included. Default 5 minutes. */
+  maxWallMs?: number;
   memoryMb?: number;
   cpus?: string;
   pidsLimit?: number;
@@ -242,14 +295,15 @@ export class DockerExecutor implements Executor {
       const finish = (r: ExecuteResult) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        disarm();
         child.stdin.end();
         spawn(docker, ["rm", "-f", name], { stdio: "ignore" }).on("error", () => {});
         resolve(r);
       };
-      const timer = setTimeout(
-        () => finish({ result: undefined, error: `Execution timed out after ${timeoutMs}ms`, logs: session.logs }),
-        timeoutMs + 5_000 // container start-up allowance
+      const disarm = armDeadline(
+        session,
+        { timeoutMs, graceMs: 5_000 /* container start-up */, maxWallMs: this.opts.maxWallMs ?? DEFAULT_MAX_WALL_MS },
+        (error) => finish({ result: undefined, error, logs: session.logs })
       );
       child.on("error", (err) =>
         finish({ result: undefined, error: `Docker is not available: ${err.message}`, logs: session.logs })

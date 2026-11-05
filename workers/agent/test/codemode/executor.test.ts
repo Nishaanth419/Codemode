@@ -50,6 +50,21 @@ describe("LocalWorkerExecutor (Code Mode Executor contract)", () => {
     await expect(run("async () => { await math.add({a:1,b:1}); while (true) {} }")).rejects.toThrow(/timed out after 1500ms/);
   });
 
+  it("does not count time spent waiting on host tools against the program budget", async () => {
+    // A slow tool (e.g. a package install) must not time out a program whose own code is fast.
+    const slow = [{ name: "slow", fns: { wait: (a: any) => new Promise((r) => setTimeout(() => r({ waited: a.ms }), a.ms)) } }];
+    const r = await local.execute("async () => { await slow.wait({ ms: 1200 }); return (await slow.wait({ ms: 1200 })).waited; }", slow);
+    expect(r.error).toBeUndefined();
+    expect(r.result).toBe(1200);
+  });
+
+  it("still stops a program at the hard wall-clock cap while tools are pending", async () => {
+    const capped = new LocalWorkerExecutor({ runtimePath: config.CODEMODE_RUNTIME_PATH, timeoutMs: 500, maxWallMs: 1000 });
+    const never = [{ name: "slow", fns: { forever: () => new Promise(() => {}) } }];
+    const r = await capped.execute("async () => slow.forever({})", never);
+    expect(r.error).toMatch(/wall-clock limit of 1000ms/);
+  });
+
   it("enforces the heap limit", async () => {
     const tiny = new LocalWorkerExecutor({ runtimePath: config.CODEMODE_RUNTIME_PATH, timeoutMs: 10_000, memoryMb: 16 });
     const r = await tiny.execute("async () => { const a = []; while (true) a.push(new Array(1e6).fill(1)); }", providers);

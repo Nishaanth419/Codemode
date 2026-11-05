@@ -94,6 +94,7 @@ export class AgentRunner {
     let providerSwitched = false;
     let nudge = false;
     let nudged = false;
+    let lastFailure: string | undefined;
 
     const announced = new Set<string>();
     const onRouterEvent = (e: RouterEvent) => {
@@ -121,11 +122,13 @@ export class AgentRunner {
         const finalStep = step > maxSteps;
         const messages = sanitizeHistory(db.listMessages(sessionId).map((m) => m.message));
         if (nudge) messages.push({ role: "user", content: NUDGE });
+        // On the final step the tools stay declared (the history contains tool calls, and some
+        // providers reject that without declarations) but calling them is forbidden.
         const request: GenerateRequest = {
-          system: finalStep ? `${system}\n\nYou have used all tool steps. Answer now using the results so far.` : system,
+          system: finalStep ? `${system}\n\n${FINAL_STEP_INSTRUCTION}` : system,
           messages,
-          tools: finalStep ? undefined : tools,
-          toolChoice: finalStep ? undefined : "auto",
+          tools,
+          toolChoice: finalStep ? "none" : "auto",
           signal
         };
 
@@ -147,7 +150,16 @@ export class AgentRunner {
         lastResult = result;
         nudge = false;
 
-        const toolCalls = result.toolCalls;
+        // A model may still emit tool calls on the final step. Never execute them.
+        const toolCalls = finalStep ? [] : result.toolCalls;
+        if (finalStep && result.toolCalls.length) {
+          for (const call of result.toolCalls) {
+            emit("tool.rejected", { toolCallId: call.id, name: call.name, reason: "The tool step budget is used up; this call was not executed." });
+          }
+        }
+        if (finalStep && !result.text.trim()) {
+          throw new StepLimitError(maxSteps, lastFailure);
+        }
         // Guard against faked execution: a program written in the reply instead of a tool call.
         if (!toolCalls.length && !finalStep && !nudged && db.countExecutions(runId) === 0 && looksLikeUnexecutedProgram(result.text, this.deps.namespaces.map((n) => n.name))) {
           nudged = true;
@@ -187,11 +199,13 @@ export class AgentRunner {
         for (const call of toolCalls) {
           const content = await this.handleToolCall({ sessionId, runId, call, result, signal, emit, providerSwitched, executedBy });
           if (content.executed) executedBy = result.provider;
+          lastFailure = failureOf(content.text);
           db.addMessage(sessionId, runId, { role: "tool", toolCallId: call.id, toolName: call.name, content: content.text });
         }
         providerSwitched = false;
       }
-      throw new Error("Agent loop ended unexpectedly");
+      // Unreachable: the final step either returns an answer or throws StepLimitError.
+      throw new StepLimitError(maxSteps, lastFailure);
     } catch (err) {
       const aborted = signal?.aborted || (err instanceof ProviderError && err.kind === "aborted");
       const error = serializeError(err);
@@ -314,6 +328,35 @@ export class AgentRunner {
   }
 }
 
+const FINAL_STEP_INSTRUCTION =
+  "You have used all tool steps. Do not call any tool. Answer now from the results so far: say what worked, what failed and why, and what the user could try next.";
+
+/** The run used its whole tool budget and the model gave no final answer. */
+export class StepLimitError extends Error {
+  constructor(
+    readonly maxSteps: number,
+    readonly lastFailure?: string
+  ) {
+    super(
+      `AgentOS stopped after ${maxSteps} tool steps without a final answer.` +
+        (lastFailure ? ` The last execution failed with: ${lastFailure}` : " Open the last execution in the inspector for details.")
+    );
+    this.name = "StepLimitError";
+  }
+}
+
+/** The error of a failed execution's tool-result text, or undefined when it succeeded. */
+function failureOf(toolResultText: string): string | undefined {
+  try {
+    const r = JSON.parse(toolResultText) as { ok?: boolean; error?: unknown };
+    if (r.ok !== false || r.error === undefined) return undefined;
+    const msg = String(r.error).replace(/\s+/g, " ").trim();
+    return msg.length > 300 ? `${msg.slice(0, 297)}…` : msg;
+  } catch {
+    return undefined;
+  }
+}
+
 const NUDGE =
   "[AgentOS] Your previous reply contained a program but did not call the codemode tool, so nothing was executed. Call the codemode tool now with that program, then answer from the real result.";
 
@@ -372,6 +415,7 @@ export function sanitizeHistory(messages: ChatMessage[]): ChatMessage[] {
 
 function serializeError(err: unknown): Record<string, unknown> & { message: string } {
   if (err instanceof LLMUnavailableError) return { ...err.toJSON(), message: err.message };
+  if (err instanceof StepLimitError) return { code: "STEP_LIMIT", maxSteps: err.maxSteps, message: err.message };
   if (err instanceof ProviderError) {
     const hint =
       err.kind === "auth"

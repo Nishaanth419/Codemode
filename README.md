@@ -172,6 +172,7 @@ Session files live in `.data/workspaces/<session>/`, mounted at `/workspace` in 
 - **Exactly-once execution.** The router never executes code, so a retried or failed LLM call cannot run a program. Executions are unique per `(run, toolCallId)`, and after a provider switch a program whose normalized hash already completed in the run is reused (`execution.deduplicated`).
 - **Program errors** (exceptions, tool failures, timeouts) come back to the model as `{ ok: false, error, logs }` so it can fix the code and retry, bounded by the step limit.
 - **Interrupted runs.** `sanitizeHistory` gives any tool call without a result a synthetic "not executed" result, so the stored history stays valid for every provider.
+- **Step limit.** After `LLM_MAX_AGENT_STEPS` tool steps the model gets one more call with tool use forbidden and must answer from what it has. Tool calls it still makes are recorded as `tool.rejected` and never run. If it gives no answer, the run fails with `STEP_LIMIT` and the last execution error.
 - **Fake execution guard.** If the model pastes a program in its reply instead of calling the tool, the reply is discarded once and the model is told to run it.
 
 ### Security model
@@ -180,10 +181,10 @@ The program is untrusted, and so is anything it fetches.
 
 | Layer | Boundary |
 |---|---|
-| Program context | Fresh V8 context; no `require` / `import` / `process` / `fetch`; string eval and Wasm off; only JSON strings cross; heap limit; wall-clock timeout kills the worker or container |
+| Program context | Fresh V8 context; no `require` / `import` / `process` / `fetch`; string eval and Wasm off; only JSON strings cross; heap limit; `CODEMODE_TIMEOUT_MS` limits the program's own run time (time waiting on host tools such as installs is not counted) and `CODEMODE_MAX_WALL_MS` caps total wall time; either kills the worker or container |
 | Host tools | Arguments validated against the tool's input schema; `fs` confined to the session workspace (no `..`, no symlink escape) |
 | Sandbox containers | `--network none`, read-only root, `--cap-drop ALL`, `no-new-privileges`, non-root user, memory / CPU / PID limits, small tmpfs |
-| Package installs | Allowlist only, validated names / versions, argv not shell, npm `--ignore-scripts`, network only during the install |
+| Package installs | Allowlist only, validated names / versions, argv not shell, pip binary wheels only (`--only-binary=:all:`, no source builds), npm `--ignore-scripts`, network only during the install |
 | `web.fetch` | Public http(s) only; private, loopback, link-local and metadata IPs blocked after DNS and after each redirect; 200 KB cap |
 | Secrets | Provider keys live only in the agent process; the browser sees names, models, health |
 
@@ -240,6 +241,7 @@ The app runs with **Groq alone, Gemini alone, or both**. A provider without a ke
 | HTTP 429 daily quota (Groq "per day (TPD/RPD)", Gemini `…PerDay…` quota id) | no | yes |
 | HTTP 500 / 502 / 503 / 504, timeout, network error | yes, bounded (`LLM_MAX_RETRIES`, exponential backoff + jitter) | yes |
 | Malformed tool call from the model (Groq `tool_use_failed`, Ollama "error parsing tool call", truncated stream) | yes, bounded | yes |
+| Empty completion: no text and no tool call (e.g. a reasoning model that used its whole output on reasoning) | yes, bounded | yes |
 | HTTP 401/403 invalid key, malformed request, unknown/decommissioned model, context overflow | **no** | **no**: the error is shown to the user |
 
 - A rate-limited provider is skipped until its retry-after time, then tried again automatically.
@@ -272,8 +274,8 @@ The LLM gets a single tool, `codemode`, with input `{ code }`; it never calls ho
 
 | `CODEMODE_EXECUTOR` | What it is | Isolation |
 |---|---|---|
-| `local` (default) | **Development adapter.** A fresh V8 context in a worker thread | Empty env, no `require` / `process` / `fetch`, string-eval and Wasm disabled, only JSON strings cross the boundary, heap limit, hard timeout (thread terminated). `node:vm` is not a security boundary. |
-| `docker` | The same runtime in a throwaway container | `--network none`, read-only root fs, `--cap-drop ALL`, no-new-privileges, memory / CPU / PID limits, hard timeout |
+| `local` (default) | **Development adapter.** A fresh V8 context in a worker thread | Empty env, no `require` / `process` / `fetch`, string-eval and Wasm disabled, only JSON strings cross the boundary, heap limit, program-time limit plus wall-clock cap (thread terminated). `node:vm` is not a security boundary. |
+| `docker` | The same runtime in a throwaway container | `--network none`, read-only root fs, `--cap-drop ALL`, no-new-privileges, memory / CPU / PID limits, program-time limit plus wall-clock cap |
 
 Neither is Cloudflare's managed **`DynamicWorkerExecutor`**. That one requires the Workers runtime with a Worker Loader binding (Dynamic Workers, which may need a paid plan), so AgentOS does not use it. Moving to Workers later means swapping `codemode/execution-router.ts`, not the agent.
 

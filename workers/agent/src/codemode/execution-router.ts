@@ -25,6 +25,7 @@ export class ExecutionRouter {
       return new DockerExecutor({
         image: this.config.SANDBOX_IMAGE,
         timeoutMs: this.config.CODEMODE_TIMEOUT_MS,
+        maxWallMs: this.config.CODEMODE_MAX_WALL_MS,
         memoryMb: this.config.CODEMODE_MEMORY_MB,
         cpus: this.config.SANDBOX_CPUS,
         pidsLimit: this.config.SANDBOX_PIDS_LIMIT,
@@ -34,6 +35,7 @@ export class ExecutionRouter {
     return new LocalWorkerExecutor({
       runtimePath: this.config.CODEMODE_RUNTIME_PATH,
       timeoutMs: this.config.CODEMODE_TIMEOUT_MS,
+      maxWallMs: this.config.CODEMODE_MAX_WALL_MS,
       memoryMb: this.config.CODEMODE_MEMORY_MB,
       ...hooks
     });

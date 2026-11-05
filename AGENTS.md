@@ -59,8 +59,9 @@ Before saying a change is done: `npm run typecheck && npm test`. If you touched 
 5. **Same agent on every provider.** Every provider gets the identical system prompt (`agent/prompts.ts`), the full persisted history and the same tool definition. Provider-specific wire details (Gemini thought signatures, OpenAI-style tool calls) stay inside the adapters.
 6. **Keys stay on the server.** The browser only sees provider names, models and health. No OpenAI or Anthropic credentials are used anywhere.
 7. **Isolation is not optional.** The program context has no `require`, `import`, `process`, `fetch`, `eval` or WebAssembly, and only JSON strings cross the boundary. Sandbox containers keep `--network none`, `--read-only`, `--cap-drop ALL`, `no-new-privileges` and resource limits. `web.fetch` blocks private, loopback, link-local and metadata addresses, including after redirects. `fs.*` rejects path traversal and symlink escapes.
-8. **Package installs are allowlisted.** `SANDBOX_ALLOWED_PACKAGES`; argv only, no shell; npm with `--ignore-scripts`.
+8. **Package installs are allowlisted and binary-only.** `SANDBOX_ALLOWED_PACKAGES`; argv only, no shell; pip `--only-binary=:all:` (the sandbox is Debian/glibc so manylinux wheels exist; source builds cannot work there); npm with `--ignore-scripts`.
 9. **Events are the contract with the UI.** Persisted events in SQLite are replayed over SSE with `Last-Event-ID`. If you add or rename an event type, update `apps/web/src/lib/timeline.ts` and its test.
+10. **The final step never executes tools.** On the last allowed step the runner sends `toolChoice: "none"` and drops any tool calls the model still returns. Timeouts measure the program's own run time; host tool waits are excluded, bounded by `CODEMODE_MAX_WALL_MS`.
 
 ## Common changes
 

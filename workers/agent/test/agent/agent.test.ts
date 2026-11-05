@@ -44,7 +44,50 @@ describe("agent loop", () => {
     mock.groq({ kind: "tool", code: ADD }, { kind: "tool", code: ADD }, { kind: "tool", code: ADD }, { kind: "tool", code: ADD }, { kind: "text", text: "final" });
     const outcome = await agent.runner.run("ses_steps", "run_steps", "loop");
     expect(outcome.text).toBe("final");
-    expect(mock.calls("groq").at(-1)!.body.tools).toBeUndefined();
+    // Tools stay declared (history contains tool calls) but calling them is forbidden.
+    expect(mock.calls("groq").at(-1)!.body.tool_choice).toBe("none");
+  });
+
+  it("never executes a tool call made on the final, answer-only step", async () => {
+    const mock = new MockLLM();
+    mock.fallback.groq = { kind: "tool", code: ADD }; // the model keeps calling tools, even on the last step
+    const agent = makeAgent(mock); // maxSteps = 4
+    const outcome = await agent.runner.run("ses_final", "run_final", "loop");
+    expect(agent.counter.state.calls).toBe(4);
+    expect(outcome.status).toBe("failed");
+    expect(outcome.error).toMatchObject({ code: "STEP_LIMIT" });
+    expect(outcome.error!.message).toMatch(/after 4 tool steps without a final answer/);
+    expect(outcome.error!.message).not.toMatch(/ended unexpectedly/);
+  });
+
+  it("uses the final-step text and ignores tool calls made alongside it", async () => {
+    const mock = new MockLLM();
+    const agent = makeAgent(mock);
+    const steps = Array.from({ length: 4 }, () => ({ kind: "tool" as const, code: ADD }));
+    mock.groq(...steps, { kind: "text", text: "Here is what I found." });
+    const outcome = await agent.runner.run("ses_final2", "run_final2", "loop");
+    expect(outcome).toMatchObject({ status: "completed", text: "Here is what I found." });
+    expect(agent.counter.state.calls).toBe(4);
+  });
+
+  it("never completes a run with an empty answer", async () => {
+    const mock = new MockLLM();
+    mock.fallback.groq = { kind: "text", text: "" };
+    mock.fallback.gemini = { kind: "text", text: "" };
+    const agent = makeAgent(mock);
+    const outcome = await agent.runner.run("ses_empty", "run_empty", "hi");
+    expect(outcome.status).toBe("failed");
+    expect(agent.db.getRun("run_empty")!.status).toBe("failed");
+    expect(agent.types("run.completed")).toHaveLength(0);
+  });
+
+  it("reports the last execution error when the step budget runs out", async () => {
+    const mock = new MockLLM();
+    mock.fallback.groq = { kind: "tool", code: "async () => { throw new Error('pip install failed') }" };
+    const agent = makeAgent(mock);
+    const outcome = await agent.runner.run("ses_final3", "run_final3", "loop");
+    expect(outcome.status).toBe("failed");
+    expect(outcome.error!.message).toContain("pip install failed");
   });
 
   it("supports cancellation", async () => {

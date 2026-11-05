@@ -53,7 +53,10 @@ const EnvSchema = z.object({
   LLM_MAX_AGENT_STEPS: int(8),
 
   CODEMODE_EXECUTOR: z.enum(["local", "docker"]).default("local"),
+  // Program run time; time spent waiting on host tools (installs, sandbox runs) is not counted.
   CODEMODE_TIMEOUT_MS: int(30_000),
+  // Hard cap on an execution's total wall time, host tools included.
+  CODEMODE_MAX_WALL_MS: int(300_000),
   CODEMODE_MEMORY_MB: int(128),
 
   SANDBOX_IMAGE: z.string().default("agentos-sandbox:latest"),

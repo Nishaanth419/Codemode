@@ -242,7 +242,7 @@ declare const codemode: { searchTools(input: { query: string }): Promise<...> };
       <>
         <code>runCode</code> from <code>@cloudflare/codemode</code> normalizes the code and hands it to an <code>Executor</code>. By default it runs
         in a fresh V8 context inside a worker thread: no <code>require</code>, <code>process</code>, <code>fetch</code> or <code>eval</code>, a heap
-        limit and a hard timeout. Set <code>CODEMODE_EXECUTOR=docker</code> to run it in a locked-down container instead.
+        limit and a time budget (time spent waiting on host tools, such as a package install, does not count). Set <code>CODEMODE_EXECUTOR=docker</code> to run it in a locked-down container instead.
       </>
     ),
     event: "execution.started",
@@ -252,7 +252,8 @@ declare const codemode: { searchTools(input: { query: string }): Promise<...> };
       content: `executor     local-worker   (or: docker)
 isolation    fresh V8 context, empty globals
 disabled     require · import · process · fetch · eval · WebAssembly
-limits       heap 128 MB · wall clock 30 s   (CODEMODE_MEMORY_MB / _TIMEOUT_MS)
+limits       heap 128 MB · program time 30 s · wall clock cap 5 min
+             (CODEMODE_MEMORY_MB / _TIMEOUT_MS / _MAX_WALL_MS)
 boundary     only JSON strings cross it
 
 the program can see:  sandbox.*  fs.*  web.*  codemode.*  console`
