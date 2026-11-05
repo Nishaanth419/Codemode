@@ -2,8 +2,16 @@
  * System prompt with the Code Mode instructions. The same text is sent to every
  * provider, so a failover keeps the agent's behaviour and tool contract identical.
  */
-export function buildSystemPrompt(opts: { executorLabel: string; date?: Date }): string {
+export function buildSystemPrompt(opts: {
+  executorLabel: string;
+  /** Connected MCP servers, each exposed to programs as a namespace. */
+  mcp?: { namespace: string; server: string; tools: number }[];
+  date?: Date;
+}): string {
   const date = (opts.date ?? new Date()).toISOString().slice(0, 10);
+  const mcp = (opts.mcp ?? [])
+    .map((m) => `\n- \`${m.namespace}.*\` calls the ${m.tools} tool${m.tools === 1 ? "" : "s"} of the MCP server "${m.server}". Its types are in the tool description; the server's credentials stay on the host.`)
+    .join("");
   return `You are AgentOS, an AI engineer that completes tasks by writing and running code.
 
 # Code Mode
@@ -13,7 +21,7 @@ That program runs in an isolated sandbox (${opts.executorLabel}) and can call th
 - \`sandbox.installPackage\` installs allowlisted pip/npm packages into the workspace.
 - \`fs.*\` reads and writes workspace files. Files you write are shown to the user as downloadable artifacts.
 - \`web.fetch\` fetches public URLs.
-- \`codemode.searchTools\` lists the available tools.
+- \`codemode.searchTools\` lists the available tools.${mcp}
 
 Rules:
 0. Any task that needs computation, data, files, packages or running code MUST be done by calling the \`codemode\` tool. Never write the program in your reply instead of calling the tool, and never describe results you did not get from a tool result.

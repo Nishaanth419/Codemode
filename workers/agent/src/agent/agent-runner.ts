@@ -9,6 +9,9 @@
  *     (including earlier tool calls and results) and the same `codemode` tool definition.
  *   - Programs are executed only after a provider call has fully succeeded, and the
  *     router never executes tools, so a failed/retried LLM call cannot run code.
+ *   - The tool namespaces (built-in + connected MCP servers) are snapshotted when a run
+ *     starts, so an MCP server connecting or dropping mid-run cannot change the tool
+ *     definition between two LLM calls of the same run.
  *   - Executions are recorded per (run, tool call id). A tool call id that already ran
  *     is never run again, and after a provider switch a program identical to one that
  *     already completed in this run reuses the stored result instead of re-running.
@@ -30,7 +33,10 @@ export interface AgentRunnerDeps {
   db: AppDatabase;
   router: ProviderRouter;
   executionRouter: ExecutionRouter;
-  namespaces: NamespaceSpec[];
+  /** Fixed list, or a function evaluated at the start of every run (MCP servers come and go). */
+  namespaces: NamespaceSpec[] | (() => NamespaceSpec[]);
+  /** Awaited before a run takes its namespace snapshot (e.g. MCP servers still connecting). */
+  beforeRun?: () => Promise<void>;
   bus: EventBus;
   maxSteps?: number;
 }
@@ -87,8 +93,13 @@ export class AgentRunner {
 
     emit("run.started", { userMessage, executor: executionRouter.info.label, chain: router.chain().map((p) => ({ provider: p.name, model: p.model })) });
 
-    const system = buildSystemPrompt({ executorLabel: executionRouter.info.label });
-    const tools = [buildCodeToolDefinition(this.deps.namespaces)];
+    await this.deps.beforeRun?.().catch(() => {});
+    const namespaces = typeof this.deps.namespaces === "function" ? this.deps.namespaces() : this.deps.namespaces;
+    const system = buildSystemPrompt({
+      executorLabel: executionRouter.info.label,
+      mcp: namespaces.filter((n) => n.source === "mcp").map((n) => ({ namespace: n.name, server: n.server ?? n.name, tools: Object.keys(n.tools).length }))
+    });
+    const tools = [buildCodeToolDefinition(namespaces)];
     let lastResult: GenerateResult | undefined;
     let executedBy: ProviderName | undefined;
     let providerSwitched = false;
@@ -161,7 +172,7 @@ export class AgentRunner {
           throw new StepLimitError(maxSteps, lastFailure);
         }
         // Guard against faked execution: a program written in the reply instead of a tool call.
-        if (!toolCalls.length && !finalStep && !nudged && db.countExecutions(runId) === 0 && looksLikeUnexecutedProgram(result.text, this.deps.namespaces.map((n) => n.name))) {
+        if (!toolCalls.length && !finalStep && !nudged && db.countExecutions(runId) === 0 && looksLikeUnexecutedProgram(result.text, namespaces.map((n) => n.name))) {
           nudged = true;
           nudge = true;
           emit("assistant.discarded", {
@@ -197,7 +208,7 @@ export class AgentRunner {
         }
 
         for (const call of toolCalls) {
-          const content = await this.handleToolCall({ sessionId, runId, call, result, signal, emit, providerSwitched, executedBy });
+          const content = await this.handleToolCall({ sessionId, runId, call, result, signal, emit, providerSwitched, executedBy, namespaces });
           if (content.executed) executedBy = result.provider;
           lastFailure = failureOf(content.text);
           db.addMessage(sessionId, runId, { role: "tool", toolCallId: call.id, toolName: call.name, content: content.text });
@@ -224,9 +235,10 @@ export class AgentRunner {
     emit: (type: string, data?: Record<string, unknown>, persist?: boolean) => unknown;
     providerSwitched: boolean;
     executedBy?: ProviderName;
+    namespaces: NamespaceSpec[];
   }): Promise<{ text: string; executed: boolean }> {
-    const { db, executionRouter, namespaces } = this.deps;
-    const { sessionId, runId, call, result, emit } = opts;
+    const { db, executionRouter } = this.deps;
+    const { sessionId, runId, call, result, emit, namespaces } = opts;
 
     if (call.name !== CODEMODE_TOOL_NAME) {
       emit("tool.rejected", { toolCallId: call.id, name: call.name });

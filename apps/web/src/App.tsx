@@ -75,8 +75,13 @@ export default function App() {
   const loadSessions = useCallback(() => api.sessions().then((r) => setSessions(r.sessions)).catch(() => {}), []);
   useEffect(() => {
     loadSessions();
-    api.tools().then((r) => setTools(r.namespaces)).catch(() => {});
   }, [loadSessions]);
+
+  // MCP servers connect in the background and can drop or reconnect: reload the tool catalog when that changes.
+  const mcpKey = status?.mcp?.servers.map((s) => `${s.name}:${s.state}:${s.toolCount}`).join("|") ?? "";
+  useEffect(() => {
+    api.tools().then((r) => setTools(r.namespaces)).catch(() => {});
+  }, [mcpKey]);
 
   useEffect(() => {
     window.location.hash = activeId ? `session=${activeId}` : "";

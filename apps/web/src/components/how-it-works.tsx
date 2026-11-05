@@ -17,6 +17,7 @@ import {
   Monitor,
   Pause,
   Play,
+  Plug,
   RotateCcw,
   Route,
   ShieldCheck,
@@ -75,7 +76,7 @@ const NODES: Record<NodeId, { label: string; sub: string; icon: ComponentType<{ 
   llm: { label: "LLM", sub: "Groq → Gemini → Ollama", icon: Sparkles, file: "providers/*-provider.ts" },
   codemode: { label: "Code Mode", sub: "types · normalize · runCode", icon: Boxes, file: "codemode/code-tool.ts" },
   executor: { label: "Executor", sub: "isolated V8 / container", icon: Cpu, file: "codemode/executors.ts" },
-  tools: { label: "Host tools", sub: "fs · sandbox · web", icon: Zap, file: "tools/registry.ts" },
+  tools: { label: "Host tools", sub: "fs · sandbox · web · MCP", icon: Zap, file: "tools/registry.ts · mcp/" },
   docker: { label: "Docker sandbox", sub: "no network · read-only", icon: Container, file: "sandbox/docker.ts" },
   store: { label: "SQLite + event bus", sub: "history · events · replay", icon: Database, file: "db/database.ts" }
 };
@@ -256,7 +257,8 @@ limits       heap 128 MB · program time 30 s · wall clock cap 5 min
              (CODEMODE_MEMORY_MB / _TIMEOUT_MS / _MAX_WALL_MS)
 boundary     only JSON strings cross it
 
-the program can see:  sandbox.*  fs.*  web.*  codemode.*  console`
+the program can see:  sandbox.*  fs.*  web.*  codemode.*  console
+                      + one namespace per connected MCP server`
     }
   },
   {
@@ -398,6 +400,7 @@ export function HowItWorks({ onTry }: { onTry: (prompt: string) => void }) {
         <Comparison />
         <Demo onTry={onTry} />
         <Layers />
+        <McpSection onTry={onTry} />
         <Guarantees />
         <Closing onTry={onTry} />
       </div>
@@ -747,7 +750,7 @@ function CodePanel({ panel }: { panel: Panel }) {
 /** Tiny highlighter for the demo snippets: keywords, strings, comments and tool namespaces. */
 function HighlightJs({ code }: { code: string }) {
   const parts: ReactNode[] = [];
-  const re = /(\/\/[^\n]*|\/\*\*[\s\S]*?\*\/)|(`[\s\S]*?`|"[^"\n]*"|'[^'\n]*')|\b(async|await|const|return|declare|Promise)\b|\b(sandbox|fs|web|codemode)\b(?=[.:])/g;
+  const re = /(\/\/[^\n]*|\/\*\*[\s\S]*?\*\/)|(`[\s\S]*?`|"[^"\n]*"|'[^'\n]*')|\b(async|await|const|return|declare|Promise)\b|\b(sandbox|fs|web|codemode|everything)\b(?=[.:])/g;
   let last = 0;
   let m: RegExpExecArray | null;
   let k = 0;
@@ -803,7 +806,7 @@ function Layers() {
       icon: Container,
       title: "Tools + sandbox",
       path: "workers/agent/src/tools · sandbox",
-      text: "fs (path-contained workspace), sandbox (Python / Node / bash in Docker, allowlisted installs), web.fetch (public hosts only), searchTools."
+      text: "fs (path-contained workspace), sandbox (Python / Node / bash in Docker, allowlisted installs), web.fetch (public hosts only), searchTools, and one namespace per MCP server."
     }
   ];
   return (
@@ -830,6 +833,243 @@ function Layers() {
   );
 }
 
+/* ---------- MCP servers ---------- */
+
+// Real payloads from @modelcontextprotocol/server-everything@2.0.0 (the server in mcp.json).
+const MCP_STEPS: { id: string; tab: string; title: string; body: ReactNode; panel: Panel }[] = [
+  {
+    id: "config",
+    tab: "1 · Configure",
+    title: "Declare the server once",
+    body: (
+      <>
+        <code>mcp.json</code> uses the familiar <code>mcpServers</code> shape: <code>command</code> + <code>args</code> + <code>env</code> for stdio,{" "}
+        <code>url</code> + <code>headers</code> for Streamable HTTP. <code>{"${VAR}"}</code> placeholders are filled from <code>.env</code>, so the
+        file holds no secrets. At startup the agent connects in the background; a server that is down is retried and shown as failed, but never
+        blocks the agent.
+      </>
+    ),
+    panel: {
+      label: "mcp.json  (MCP_CONFIG_FILE=mcp.json)",
+      lang: "json",
+      content: `{
+  "mcpServers": {
+    "everything": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything@2.0.0"],
+      "description": "Reference MCP server with demo tools (echo, get-sum, structured content, errors). No API key needed."
+    }
+  }
+}
+
+// agent log
+  MCP everything (stdio: npx -y @modelcontextprotocol/server-everything@2.0.0) → 16 tools as \`everything.*\``
+    }
+  },
+  {
+    id: "discover",
+    tab: "2 · Discover",
+    title: "tools/list returns JSON Schemas",
+    body: (
+      <>
+        The MCP client (the official <code>@modelcontextprotocol/sdk</code>) runs <code>tools/list</code>. Each tool brings an{" "}
+        <code>inputSchema</code> and, when the server declares one, an <code>outputSchema</code>. Note the hyphenated name: it is not a valid
+        JavaScript identifier.
+      </>
+    ),
+    panel: {
+      label: "tools/list → tools[] (excerpt: 1 of 16)",
+      lang: "json",
+      content: `{
+  "name": "get-structured-content",
+  "title": "Get Structured Content Tool",
+  "description": "Returns structured content along with an output schema for client data validation",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "location": {
+        "type": "string",
+        "enum": ["New York", "Chicago", "Los Angeles"],
+        "description": "Choose city"
+      }
+    },
+    "required": ["location"],
+    "$schema": "https://json-schema.org/draft/2020-12/schema"
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "temperature": { "type": "number", "description": "Temperature in celsius" },
+      "conditions": { "type": "string", "description": "Weather conditions description" },
+      "humidity": { "type": "number", "description": "Humidity percentage" }
+    },
+    "required": ["temperature", "conditions", "humidity"],
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false
+  },
+  "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
+}`
+    }
+  },
+  {
+    id: "types",
+    tab: "3 · Generate types",
+    title: "Each server becomes a typed namespace",
+    body: (
+      <>
+        <code>McpConnector</code> from <code>@cloudflare/codemode</code> sanitizes names (<code>get-structured-content</code> →{" "}
+        <code>get_structured_content</code>, the real name is kept for the call), and the same <code>generateTypesFromJsonSchema</code> pipeline as
+        the built-in tools writes the declaration. Tools without an output schema return <code>McpToolResult</code>. This block is added to the{" "}
+        <code>codemode</code> tool description; the model still sees one tool.
+      </>
+    ),
+    panel: {
+      label: "namespaceTypes(everything)  (excerpt: 2 of 16 tools)",
+      lang: "js",
+      content: `/** Tools from the MCP server "everything" (mcp-servers/everything 2.0.0). Reference MCP server with demo tools (echo, get-sum, structured content, errors). No API key needed. Tools typed McpToolResult have no MCP output schema. A tool error is thrown. */
+/** Result of an MCP tool that declares no output schema: its text output (JSON-parsed when the text is JSON), or the raw MCP result when it contains images, audio or resources. */
+type McpToolResult = string | number | boolean | null | unknown[] | { [key: string]: unknown } | { content: McpContent[] };
+type McpContent =
+    | { type: "text"; text: string }
+    | { type: "image" | "audio"; data: string; mimeType: string }
+    | { type: "resource" | "resource_link"; [key: string]: unknown };
+type GetStructuredContentInput = {
+    /** Choose city */
+    location: "New York" | "Chicago" | "Los Angeles";
+}
+type GetStructuredContentOutput = {
+    /** Temperature in celsius */
+    temperature: number;
+    /** Weather conditions description */
+    conditions: string;
+    /** Humidity percentage */
+    humidity: number;
+}
+type GetSumInput = {
+    /** First number */
+    a: number;
+    /** Second number */
+    b: number;
+}
+type GetSumOutput = McpToolResult
+
+declare const everything: {
+	/**
+	 * Returns structured content along with an output schema for client data validation
+	 * @param input.location - Choose city
+	 */
+	get_structured_content: (input: GetStructuredContentInput) => Promise<GetStructuredContentOutput>;
+
+	/**
+	 * Returns the sum of two numbers
+	 * @param input.a - First number
+	 * @param input.b - Second number
+	 */
+	get_sum: (input: GetSumInput) => Promise<GetSumOutput>;
+}`
+    }
+  },
+  {
+    id: "call",
+    tab: "4 · Call",
+    title: "The program calls it like any other API",
+    body: (
+      <>
+        Inside the executor <code>everything.get_sum</code> is a stub. The call crosses the boundary as JSON, the host maps it back to the MCP name and
+        runs <code>tools/call</code>. Results are unwrapped: <code>structuredContent</code> as is, text as a string (JSON-parsed when it is JSON);{" "}
+        <code>isError</code> becomes a thrown error. The program never holds the client, its transport or any credential.
+      </>
+    ),
+    panel: {
+      label: "program → runtime → host → MCP server",
+      lang: "js",
+      content: `async () => {
+  const [sum, weather] = await Promise.all([
+    everything.get_sum({ a: 1234, b: 5678 }),
+    everything.get_structured_content({ location: "Chicago" })
+  ]);
+  return { sum, weather };
+}
+
+// runtime → host
+{ "type": "tool-call", "id": "1", "namespace": "everything", "name": "get_sum", "args": "{\\"a\\":1234,\\"b\\":5678}" }
+
+// host → MCP server: JSON-RPC tools/call params, with the real MCP name
+{ "method": "tools/call", "params": { "name": "get-sum", "arguments": { "a": 1234, "b": 5678 } } }
+
+// MCP results
+{ "content": [{ "type": "text", "text": "The sum of 1234 and 5678 is 6912." }] }
+{ "content": [{ "type": "text", "text": "{\\"temperature\\":36,\\"conditions\\":\\"Light rain / drizzle\\",\\"humidity\\":82}" }],
+  "structuredContent": { "temperature": 36, "conditions": "Light rain / drizzle", "humidity": 82 } }
+
+// program return value
+{ "sum": "The sum of 1234 and 5678 is 6912.",
+  "weather": { "temperature": 36, "conditions": "Light rain / drizzle", "humidity": 82 } }`
+    }
+  }
+];
+
+const MCP_PROMPT =
+  "Using the everything MCP server in one program: add 1234 and 5678 with its sum tool and get the structured weather for Chicago.";
+
+function McpSection({ onTry }: { onTry: (p: string) => void }) {
+  const [i, setI] = useState(0);
+  const step = MCP_STEPS[i];
+  return (
+    <section id="mcp" className="scroll-mt-6 py-14">
+      <SectionHead kicker="04 · MCP servers" title="Any MCP server becomes a typed API">
+        Following Cloudflare's Code Mode design, AgentOS does not hand MCP tools to the model as separate tools. It connects to each server, turns its
+        tools into TypeScript, and lets the program call them. The model still sees only <code className="text-paper">codemode</code>.
+      </SectionHead>
+      <div className="rounded-2xl border border-line bg-obsidian-950/80 p-3 sm:p-4">
+        <div role="tablist" aria-label="MCP walkthrough" className="mb-4 flex gap-1 overflow-x-auto rounded-xl border border-line bg-surface/60 p-1">
+          {MCP_STEPS.map((s, k) => (
+            <button
+              key={s.id}
+              role="tab"
+              aria-selected={k === i}
+              onClick={() => setI(k)}
+              className={cn(
+                "shrink-0 rounded-lg px-3 py-1.5 font-mono text-[11px] transition-colors cursor-pointer",
+                k === i ? "bg-lime/[0.12] text-lime ring-1 ring-inset ring-lime/30" : "text-muted hover:bg-surface-2 hover:text-paper"
+              )}
+            >
+              {s.tab}
+            </button>
+          ))}
+        </div>
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
+          <div key={step.id} className="flex animate-[fadein_.35s_ease] flex-col gap-3">
+            <div className="rounded-xl border border-line bg-surface/60 p-4">
+              <div className="mb-2 flex items-center gap-2">
+                <Plug className="size-4 text-lime" />
+                <span className="font-mono text-[11px] text-faint">
+                  {String(i + 1).padStart(2, "0")} / {String(MCP_STEPS.length).padStart(2, "0")}
+                </span>
+              </div>
+              <h3 className="text-lg font-semibold tracking-tight">{step.title}</h3>
+              <p className="hiw-body mt-2 text-sm leading-relaxed text-muted">{step.body}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="icon-sm" onClick={() => setI((k) => Math.max(k - 1, 0))} disabled={i === 0} aria-label="Previous MCP step">
+                <ChevronLeft />
+              </Button>
+              <Button variant="outline" size="icon-sm" onClick={() => setI((k) => Math.min(k + 1, MCP_STEPS.length - 1))} disabled={i === MCP_STEPS.length - 1} aria-label="Next MCP step">
+                <ChevronRight />
+              </Button>
+              <span className="ml-1 hidden font-mono text-[11px] text-faint sm:inline">workers/agent/src/mcp/</span>
+              <Button size="sm" className="ml-auto" onClick={() => onTry(MCP_PROMPT)}>
+                Try it <ArrowRight />
+              </Button>
+            </div>
+          </div>
+          <CodePanel key={`${step.id}-panel`} panel={step.panel} />
+        </div>
+      </div>
+    </section>
+  );
+}
+
 /* ---------- Guarantees ---------- */
 
 function Guarantees() {
@@ -839,11 +1079,12 @@ function Guarantees() {
     ["Same agent on every provider", "Identical system prompt, history and tool definition. Gemini thought signatures are kept; foreign tool calls are replayed as transcripts."],
     ["Untrusted code stays boxed", "The program sees only typed stubs. Sandbox containers have no network, a read-only root, no capabilities and resource limits."],
     ["The web tool can't reach your network", "Private, loopback, link-local and metadata addresses are blocked, including after redirects."],
-    ["Nothing is lost on reload", "Every event is persisted in SQLite and replayed over SSE with Last-Event-ID."]
+    ["Nothing is lost on reload", "Every event is persisted in SQLite and replayed over SSE with Last-Event-ID."],
+    ["MCP credentials stay on the host", "Server tokens and env live in the agent process. Programs get typed stubs; a stdio server gets only a minimal environment plus its own env."]
   ];
   return (
     <section className="py-14">
-      <SectionHead kicker="04 · guarantees" title="What you can rely on" />
+      <SectionHead kicker="05 · guarantees" title="What you can rely on" />
       <div className="grid gap-x-8 gap-y-5 md:grid-cols-2">
         {rows.map(([t, d]) => (
           <div key={t} className="flex gap-3">
