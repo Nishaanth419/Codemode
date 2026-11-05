@@ -1,6 +1,7 @@
-import { Braces, FileBarChart, Globe, Menu, PanelRight, Wrench } from "lucide-react";
+import { Braces, FileBarChart, Globe, GraduationCap, Menu, PanelRight, Wrench } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChatTimeline, Composer } from "./components/chat";
+import { DRAFT_KEY } from "./components/how-it-works";
 import { Inspector } from "./components/inspector";
 import { ProviderStatusBar } from "./components/provider-status";
 import { Sidebar } from "./components/sidebar";
@@ -34,6 +35,15 @@ const EXAMPLES = [
   }
 ];
 
+/** A prompt handed over from the How it works page, if any. */
+function readDraft(): string {
+  try {
+    return sessionStorage.getItem(DRAFT_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 function readHash() {
   const m = window.location.hash.match(/session=([\w-]+)/);
   return m ? m[1] : null;
@@ -46,13 +56,21 @@ export default function App() {
   const [history, setHistory] = useState<Execution[]>([]);
   const [selectedExec, setSelectedExec] = useState<string | null>(null);
   const [tab, setTab] = useState("timeline");
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(readDraft);
   const [refreshKey, setRefreshKey] = useState(0);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const { status, setStatus, error: statusError } = useSystemStatus();
   const { timeline } = useSessionStream(activeId, setStatus);
+
+  useEffect(() => {
+    try {
+      sessionStorage.removeItem(DRAFT_KEY);
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   const loadSessions = useCallback(() => api.sessions().then((r) => setSessions(r.sessions)).catch(() => {}), []);
   useEffect(() => {
@@ -156,6 +174,12 @@ export default function App() {
                 )}
               </div>
             </div>
+            <a
+              href="#how-it-works"
+              className="hidden shrink-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-muted hover:bg-surface-2 hover:text-paper md:inline-flex"
+            >
+              <GraduationCap className="size-3.5" /> How it works
+            </a>
             <ProviderStatusBar status={status} />
             <button className="rounded-md p-1.5 text-muted hover:bg-surface-2 hover:text-paper xl:hidden" onClick={() => setInspectorOpen(true)} aria-label="Open inspector">
               <PanelRight className="size-4" />
@@ -244,6 +268,9 @@ function EmptyState({ onPick }: { onPick: (p: string) => void }) {
       <p className="mt-4 max-w-xl text-[15px] leading-relaxed text-muted">
         The model writes one JavaScript program against typed tool APIs. It runs in an isolated executor, calls Python, Node.js and shell in Docker, and every step is traced on the right.
       </p>
+      <a href="#how-it-works" className="mt-4 inline-flex w-fit items-center gap-1.5 text-sm text-lime hover:underline hover:underline-offset-4">
+        <GraduationCap className="size-4" /> New here? Watch a 2-minute walkthrough of how it works →
+      </a>
       <div className="mt-9 grid grid-cols-1 gap-3 sm:grid-cols-2">
         {EXAMPLES.map((ex) => (
           <button

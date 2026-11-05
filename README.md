@@ -2,6 +2,8 @@
 
 An AI workspace where you describe a task in natural language, and an LLM writes **one JavaScript program** that orchestrates typed tools. The program runs in an isolated executor, calls Python / Node.js / shell inside Docker, and every step is traced live in the UI. This is Cloudflare's **Code Mode** pattern (`@cloudflare/codemode`), running on free-tier and local infrastructure.
 
+**New here?** Open the **How it works** page in the app (`/#how-it-works`), then read [System design](#system-design). Contributors and coding agents: see [AGENTS.md](AGENTS.md).
+
 ```
 React workspace ──SSE──▶ Agent backend ──▶ LLM router ──▶ Groq ─(fails over)─▶ Gemini ─▶ (Ollama, optional)
  (Vite, Tailwind,          (Express, Zod,      │
@@ -37,6 +39,172 @@ WEB_PORT=8088 docker compose up --build      # if port 8080 is taken
 ```
 
 The agent container starts sandbox containers as siblings through `/var/run/docker.sock`. That gives it control of the host Docker daemon, which is fine for local development but not for multi-tenant hosting.
+
+## System design
+
+> New to the project? Open **How it works** in the app (header link, or http://localhost:5173/#how-it-works). It replays one run step by step, with a toggle that shows a Groq → Gemini failover. It is scripted, so it works without API keys.
+
+### Goals
+
+1. Let a model do multi-step work with **one round trip per plan**, not one per tool call.
+2. Run model-written code **without trusting it**.
+3. Keep working when a free-tier provider rate limits, **without changing the agent's behaviour** and **without ever running a program twice**.
+4. Make every step **observable and replayable** in the UI.
+
+### Why Code Mode
+
+Classic tool calling makes the model emit one JSON tool call, wait for the result, read it, emit the next. Every intermediate result passes back through the context window. Code Mode turns the tool catalog into TypeScript declarations and gives the model a single `codemode` tool. The model writes the whole plan as a program, with loops, conditionals and `Promise.all`. Intermediate values stay inside the program, and only the final return value goes back to the model.
+
+| | Classic tool calling | Code Mode |
+|---|---|---|
+| LLM calls for "run Python, then a shell command on its output, then answer" | 3 | 2 |
+| Tools visible to the model | every tool, as JSON schemas | one tool; the rest are a typed API in its description |
+| Control flow | the model, one step at a time | real JavaScript |
+| Intermediate results in context | all of them | only what the program returns |
+
+### Components
+
+```mermaid
+flowchart LR
+  subgraph Browser
+    UI["Web workspace<br/>apps/web"]
+  end
+  subgraph Agent["Agent backend · workers/agent"]
+    API["server.ts<br/>REST + SSE"]
+    RUN["agent-runner.ts<br/>agent loop"]
+    PR["provider-router.ts<br/>retry · failover · health"]
+    CM["code-tool.ts<br/>types · runCode"]
+    EX["execution-router.ts<br/>local | docker executor"]
+    TOOLS["tools/registry.ts<br/>fs · sandbox · web · codemode"]
+    BUS["event-bus.ts"]
+    DB[("SQLite<br/>.data/agentos.sqlite")]
+  end
+  subgraph Providers["LLM providers"]
+    G["Groq"]
+    GM["Gemini"]
+    O["Ollama (optional)"]
+  end
+  SB["Docker sandbox<br/>python · node · bash"]
+  WS[("Session workspace<br/>.data/workspaces/:id")]
+
+  UI -- "POST message" --> API
+  API -- "SSE events" --> UI
+  API --> RUN
+  RUN --> PR --> G & GM & O
+  RUN --> CM --> EX
+  EX -- "tool-call messages" --> TOOLS
+  TOOLS --> SB
+  TOOLS --> WS
+  SB --- WS
+  RUN --> BUS --> DB
+  BUS --> API
+```
+
+| Component | Responsibility | Must not |
+|---|---|---|
+| Web workspace | Chat, execution cards, inspector, provider status, How it works page | hold secrets or call providers |
+| `server.ts` | REST routes, SSE stream with replay, zod validation | contain agent logic |
+| `agent-runner.ts` | The loop: build request → router → execute `codemode` calls → append results → repeat (max `LLM_MAX_AGENT_STEPS`) | execute anything before a provider call fully succeeds |
+| `providers/` | One `LLMProvider` interface over Groq / Gemini / Ollama, error classification, retry, failover, health | run code |
+| `codemode/` | Generate types from tool schemas, define the `codemode` tool, run programs via `@cloudflare/codemode` `runCode` | expose host objects to the program |
+| Executors + `codemode-runtime.mjs` | Run the program in a fresh V8 context (worker thread) or a container; forward tool calls to the host as JSON | allow `require`, `process`, `fetch`, `eval`, Wasm |
+| `tools/registry.ts` | The host functions programs can call; validates args and reports each call | trust program input |
+| `sandbox/` | Docker runner, workspace path safety, package allowlist | give containers network (except allowlisted installs) |
+| `db/` + `event-bus.ts` | Persist sessions, runs, messages, executions, events; fan events out to SSE | drop persisted events |
+
+### Request lifecycle
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant UI as Web UI
+  participant S as server.ts
+  participant R as AgentRunner
+  participant P as ProviderRouter
+  participant L as LLM (Groq / Gemini)
+  participant E as Executor
+  participant T as Host tools
+  participant D as Docker sandbox
+
+  UI->>S: POST /api/sessions/:id/messages { content }
+  S-->>UI: 202 { runId }
+  Note over UI,S: UI already holds GET /api/sessions/:id/events (SSE)
+  S->>R: start(sessionId, content)
+  R->>P: stream(system prompt + history + codemode tool)
+  P->>L: request (retries / fails over on transient errors)
+  L-->>P: tool call codemode({ code })
+  P-->>R: complete result (partial streams discarded)
+  R->>R: dedupe by (run, toolCallId) and code hash
+  R->>E: runCode(code, providers)
+  loop each tool call in the program
+    E->>T: { type: "tool-call", namespace, name, args }
+    T->>D: docker run --network none --read-only ...
+    D-->>T: stdout / stderr / exit code
+    T-->>E: JSON result
+  end
+  E-->>R: { result, logs }
+  R->>R: store execution, append tool message
+  R->>P: stream(history + tool result)
+  P->>L: request
+  L-->>P: final answer (no tool calls)
+  R-->>UI: run.completed (via event bus → SSE)
+```
+
+Each arrow that changes state also emits an event (`run.started`, `llm.request`, `provider.retry`, `provider.failover`, `assistant.delta`, `assistant.message`, `execution.started`, `tool.call`, `tool.result`, `execution.log`, `execution.output`, `execution.completed`, `execution.deduplicated`, `run.completed` / `run.failed` / `run.cancelled`). Text deltas are live-only; everything else is persisted.
+
+### Data model
+
+SQLite via `node:sqlite`, one file, `<DATA_DIR>/agentos.sqlite` (default `.data/`).
+
+| Table | Key columns | Purpose |
+|---|---|---|
+| `sessions` | `id`, `title`, `updated_at` | A conversation and its workspace directory |
+| `runs` | `id`, `session_id`, `status`, `provider`, `model`, `error` | One user message and everything it triggered |
+| `messages` | `session_id`, `role`, `content`, `tool_calls`, `tool_call_id`, `provider`, `model` | Provider-neutral history replayed to whichever provider serves the next request |
+| `executions` | `run_id`, `tool_call_id`, `code`, `code_hash`, `status`, `result`, `logs`, `executor` | Every program run; the basis for idempotency and the History tab |
+| `events` | `id` (monotonic), `run_id`, `session_id`, `type`, `data` | The UI timeline; `id` is the SSE `Last-Event-ID` |
+
+Session files live in `.data/workspaces/<session>/`, mounted at `/workspace` in the sandbox and listed as artifacts in the UI.
+
+### Failure model
+
+- **Provider errors** are normalized into a `ProviderError.kind`. The retry policy decides between *retry the same provider*, *fail over* and *fail*; see [Failover policy](#failover-policy-workersagentsrcproviders).
+- **Exactly-once execution.** The router never executes code, so a retried or failed LLM call cannot run a program. Executions are unique per `(run, toolCallId)`, and after a provider switch a program whose normalized hash already completed in the run is reused (`execution.deduplicated`).
+- **Program errors** (exceptions, tool failures, timeouts) come back to the model as `{ ok: false, error, logs }` so it can fix the code and retry, bounded by the step limit.
+- **Interrupted runs.** `sanitizeHistory` gives any tool call without a result a synthetic "not executed" result, so the stored history stays valid for every provider.
+- **Fake execution guard.** If the model pastes a program in its reply instead of calling the tool, the reply is discarded once and the model is told to run it.
+
+### Security model
+
+The program is untrusted, and so is anything it fetches.
+
+| Layer | Boundary |
+|---|---|
+| Program context | Fresh V8 context; no `require` / `import` / `process` / `fetch`; string eval and Wasm off; only JSON strings cross; heap limit; wall-clock timeout kills the worker or container |
+| Host tools | Arguments validated against the tool's input schema; `fs` confined to the session workspace (no `..`, no symlink escape) |
+| Sandbox containers | `--network none`, read-only root, `--cap-drop ALL`, `no-new-privileges`, non-root user, memory / CPU / PID limits, small tmpfs |
+| Package installs | Allowlist only, validated names / versions, argv not shell, npm `--ignore-scripts`, network only during the install |
+| `web.fetch` | Public http(s) only; private, loopback, link-local and metadata IPs blocked after DNS and after each redirect; 200 KB cap |
+| Secrets | Provider keys live only in the agent process; the browser sees names, models, health |
+
+The `local` executor is a development adapter: `node:vm` is not a security boundary. Use `CODEMODE_EXECUTOR=docker` when the stronger boundary matters.
+
+### Deployment
+
+- **Local dev:** `npm run dev`. Agent on `127.0.0.1:8787`, Vite on `:5173` proxying `/api`.
+- **Docker Compose:** nginx serves the web build and proxies `/api` to the agent container. The agent starts sandbox containers as siblings through the host Docker socket (`WORKSPACE_HOST_DIR` maps the data dir for mounts).
+- **Cloudflare Workers (future):** the agent and executors already speak `@cloudflare/codemode`'s `Executor` interface. Moving means adding a `DynamicWorkerExecutor` in `codemode/execution-router.ts` and replacing SQLite / Docker with Workers equivalents; the agent loop does not change.
+
+### Design decisions
+
+| Decision | Why | Trade-off |
+|---|---|---|
+| One `codemode` tool instead of many tools | Fewer round trips, real control flow, smaller context | A program failure is coarser than a single tool failure; the model must fix and rerun |
+| Own provider layer instead of an AI SDK wrapper | Precise error classification, failover mid-run, Gemini thought signatures | More adapter code to maintain |
+| Provider-neutral history in SQLite | Any provider can continue any conversation | Foreign tool calls are replayed to Gemini as transcripts, not native calls |
+| Execute only after a full provider response | Makes "never run twice" provable | No speculative execution while streaming |
+| Two executors behind one interface | Fast local dev; container isolation when needed; Workers later | `local` is not a hard boundary |
+| SSE with persisted events | Simple, reload-safe, replayable | One-way; actions use REST |
 
 ## LLM providers
 
@@ -122,6 +290,7 @@ Files in the workspace appear as downloadable artifacts in the UI.
 
 ## UI
 
+- **How it works** (`/#how-it-works`, linked from the header and the empty state): a scripted, step-by-step replay of one run, with a failover toggle. "Try it yourself" opens the workspace with the demo prompt filled in.
 - **Left sidebar:** sessions, tool catalog, executor and sandbox status.
 - **Centre:** the chat. Answers are rendered as Markdown and tagged with the model that wrote them. Each execution card shows the program, tool-call chips, sandbox output and return value. Retry and failover notices appear inline.
 - **Right inspector** has five tabs:

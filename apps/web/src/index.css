@@ -77,3 +77,9 @@ body {
 
 /* Thin scrollbars */
 * { scrollbar-width: thin; scrollbar-color: var(--color-line-strong) transparent; }
+
+/* How it works page */
+@keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.hiw-body code { font-family: var(--font-mono); font-size: 0.85em; color: var(--color-paper); background: var(--color-surface-3); padding: 0.1em 0.35em; border-radius: 4px; }
+.hiw-body strong { color: var(--color-paper); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { .animate-\[fadein_\.35s_ease\] { animation: none; } }
