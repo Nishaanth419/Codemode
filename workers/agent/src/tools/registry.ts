@@ -5,6 +5,7 @@
  *   sandbox.*   Python / Node.js / shell in Docker, plus allowlisted package installs
  *   web.*       outbound HTTP GET/POST from the host, blocked for private networks
  *   codemode.*  tool discovery
+ *   <server>.*  tools of each connected MCP server (built in mcp/namespace.ts, not here)
  *
  * The LLM never calls these directly: it writes one program that calls them, and the
  * Code Mode executor dispatches each call back here.
@@ -23,6 +24,8 @@ export interface ToolContext {
   executionId: string;
   signal?: AbortSignal;
   onOutput?: (source: string, stream: "stdout" | "stderr", chunk: string) => void;
+  /** Every namespace bound to this execution (built-in and MCP), for codemode.searchTools. */
+  catalog?: NamespaceSpec[];
 }
 
 export interface ToolSpec {
@@ -30,12 +33,18 @@ export interface ToolSpec {
   inputSchema: JsonSchema;
   outputSchema?: JsonSchema;
   execute: (args: any, ctx: ToolContext) => Promise<unknown>;
+  /** Real MCP tool name when it differs from the sanitized JS name (e.g. "get-sum" for get_sum). */
+  mcpName?: string;
 }
 
 export interface NamespaceSpec {
   name: string;
   description: string;
   tools: Record<string, ToolSpec>;
+  /** "mcp" for namespaces generated from an MCP server. */
+  source?: "builtin" | "mcp";
+  /** MCP server name from the config, for MCP namespaces. */
+  server?: string;
 }
 
 export interface ToolObserver {
@@ -244,21 +253,35 @@ export function createToolNamespaces(deps: ToolDeps): NamespaceSpec[] {
     description: "Tool discovery.",
     tools: {
       searchTools: {
-        description: "Search the available tools by keyword. Returns matching tool names with descriptions.",
+        description:
+          "Search the available tools (built-in and MCP servers) by keyword. Returns matching tool names with descriptions; MCP tools also carry their server and real MCP tool name.",
         inputSchema: { type: "object", properties: { query: { type: "string" } } },
         outputSchema: {
           type: "object",
           properties: {
-            tools: { type: "array", items: { type: "object", properties: { name: { type: "string" }, description: { type: "string" } } } }
+            tools: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: { name: { type: "string" }, description: { type: "string" }, mcpServer: { type: "string" }, mcpTool: { type: "string" } },
+                required: ["name", "description"]
+              }
+            }
           },
           required: ["tools"]
         },
-        execute: async (a) => {
+        execute: async (a, ctx) => {
           const q = String(a.query ?? "").toLowerCase();
-          const tools = namespaces.flatMap((ns) =>
-            Object.entries(ns.tools).map(([name, t]) => ({ name: `${ns.name}.${name}`, description: t.description }))
+          const tools = (ctx.catalog ?? namespaces).flatMap((ns) =>
+            Object.entries(ns.tools).map(([name, t]) => ({
+              name: `${ns.name}.${name}`,
+              description: t.description,
+              ...(ns.source === "mcp" ? { mcpServer: ns.server, mcpTool: t.mcpName ?? name } : {})
+            }))
           );
-          return { tools: q ? tools.filter((t) => `${t.name} ${t.description}`.toLowerCase().includes(q)) : tools };
+          const words = q.split(/\s+/).filter(Boolean);
+          const hay = (t: (typeof tools)[number]) => `${t.name} ${t.mcpTool ?? ""} ${t.mcpServer ?? ""} ${t.description}`.toLowerCase();
+          return { tools: words.length ? tools.filter((t) => words.every((w) => hay(t).includes(w))) : tools };
         }
       }
     }

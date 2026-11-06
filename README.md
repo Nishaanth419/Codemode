@@ -1,6 +1,6 @@
 # AgentOS
 
-An AI workspace where you describe a task in natural language, and an LLM writes **one JavaScript program** that orchestrates typed tools. The program runs in an isolated executor, calls Python / Node.js / shell inside Docker, and every step is traced live in the UI. This is Cloudflare's **Code Mode** pattern (`@cloudflare/codemode`), running on free-tier and local infrastructure.
+An AI workspace where you describe a task in natural language, and an LLM writes **one JavaScript program** that orchestrates typed tools. The program runs in an isolated executor, calls Python / Node.js / shell inside Docker, and every step is traced live in the UI. This is Cloudflare's **Code Mode** pattern (`@cloudflare/codemode`), running on free-tier and local infrastructure. [MCP servers](#mcp-servers) plug in the same way: each server's tools become a typed TypeScript API that programs call, while the model still sees one tool.
 
 **New here?** Open the **How it works** page in the app (`/#how-it-works`), then read [System design](#system-design). Contributors and coding agents: see [AGENTS.md](AGENTS.md).
 
@@ -14,6 +14,7 @@ React workspace ──SSE──▶ Agent backend ──▶ LLM router ──▶ 
                                                │           └─▶ Docker container executor       (CODEMODE_EXECUTOR=docker)
                                                ▼  tool calls from the program
                                           fs.* · sandbox.runPython/runNode/runShell/installPackage · web.fetch · codemode.searchTools
+                                          <server>.* (one namespace per MCP server) ──▶ MCP client ──▶ stdio / Streamable HTTP servers
                                                          └─▶ Docker sandbox (no network, read-only, limits)
 ```
 
@@ -27,6 +28,8 @@ npm run sandbox:build          # builds agentos-sandbox:latest (Python 3 + Node 
 cp .env.example .env           # add GROQ_API_KEY and/or GEMINI_API_KEY
 npm run dev                    # agent on :8787, web on :5173
 ```
+
+`.env.example` sets `MCP_CONFIG_FILE=mcp.json`, which connects the keyless demo MCP server (`@modelcontextprotocol/server-everything`, started with `npx`). Remove the line to run without MCP.
 
 Open http://localhost:5173.
 
@@ -76,6 +79,7 @@ flowchart LR
     CM["code-tool.ts<br/>types · runCode"]
     EX["execution-router.ts<br/>local | docker executor"]
     TOOLS["tools/registry.ts<br/>fs · sandbox · web · codemode"]
+    MCP["mcp/<br/>MCP client · one namespace per server"]
     BUS["event-bus.ts"]
     DB[("SQLite<br/>.data/agentos.sqlite")]
   end
@@ -85,6 +89,7 @@ flowchart LR
     O["Ollama (optional)"]
   end
   SB["Docker sandbox<br/>python · node · bash"]
+  MS["MCP servers<br/>stdio · Streamable HTTP"]
   WS[("Session workspace<br/>.data/workspaces/:id")]
 
   UI -- "POST message" --> API
@@ -93,6 +98,8 @@ flowchart LR
   RUN --> PR --> G & GM & O
   RUN --> CM --> EX
   EX -- "tool-call messages" --> TOOLS
+  EX -- "tool-call messages" --> MCP
+  MCP -- "tools/list · tools/call" --> MS
   TOOLS --> SB
   TOOLS --> WS
   SB --- WS
@@ -109,6 +116,7 @@ flowchart LR
 | `codemode/` | Generate types from tool schemas, define the `codemode` tool, run programs via `@cloudflare/codemode` `runCode` | expose host objects to the program |
 | Executors + `codemode-runtime.mjs` | Run the program in a fresh V8 context (worker thread) or a container; forward tool calls to the host as JSON | allow `require`, `process`, `fetch`, `eval`, Wasm |
 | `tools/registry.ts` | The host functions programs can call; validates args and reports each call | trust program input |
+| `mcp/` | Connect to MCP servers, turn each server's tools into a namespace, call them, reconnect, report health | hand the program the client, a transport or a credential |
 | `sandbox/` | Docker runner, workspace path safety, package allowlist | give containers network (except allowlisted installs) |
 | `db/` + `event-bus.ts` | Persist sessions, runs, messages, executions, events; fan events out to SSE | drop persisted events |
 
@@ -187,6 +195,7 @@ The program is untrusted, and so is anything it fetches.
 | Package installs | Allowlist only, validated names / versions, argv not shell, pip binary wheels only (`--only-binary=:all:`, no source builds), npm `--ignore-scripts`, network only during the install |
 | `web.fetch` | Public http(s) only; private, loopback, link-local and metadata IPs blocked after DNS and after each redirect; 200 KB cap |
 | Secrets | Provider keys live only in the agent process; the browser sees names, models, health |
+| MCP servers | Server credentials (`env`, `headers`, `${VAR}` values) stay in the agent process; programs get typed stubs and JSON results only. Stdio servers get the MCP SDK's minimal default environment (`PATH`, `HOME`, `USER`, …) plus their own `env`, never the agent's LLM keys. The UI sees the command or URL as written (no query string, no header or env values). A server's tool descriptions and results are untrusted input, like any `web.fetch` result |
 
 The `local` executor is a development adapter: `node:vm` is not a security boundary. Use `CODEMODE_EXECUTOR=docker` when the stronger boundary matters.
 
@@ -206,6 +215,7 @@ The `local` executor is a development adapter: `node:vm` is not a security bound
 | Execute only after a full provider response | Makes "never run twice" provable | No speculative execution while streaming |
 | Two executors behind one interface | Fast local dev; container isolation when needed; Workers later | `local` is not a hard boundary |
 | SSE with persisted events | Simple, reload-safe, replayable | One-way; actions use REST |
+| MCP tools as a typed namespace, not LLM tools | Same Code Mode benefits for any MCP server; credentials never enter the program | The model only learns a server's tools from its types; a server with hundreds of tools makes a long tool description |
 
 ## LLM providers
 
@@ -286,14 +296,74 @@ Neither is Cloudflare's managed **`DynamicWorkerExecutor`**. That one requires t
 | `fs` | `listFiles`, `readFile`, `writeFile`, `deleteFile`, all confined to the session workspace (path traversal and symlink escapes are rejected) |
 | `sandbox` | `runPython`, `runNode`, `runShell` (Docker, no network, workspace mounted at `/workspace`), `installPackage` (pip/npm **allowlist** only; names and versions validated; argv only, no shell; network enabled only for the install; npm `--ignore-scripts`), `listAllowedPackages` |
 | `web` | `fetch`: public http(s) only; private, loopback, link-local and metadata addresses are blocked, including after redirects; 200 KB cap |
-| `codemode` | `searchTools`: tool discovery |
+| `codemode` | `searchTools`: tool discovery across built-in and MCP tools (MCP hits include the server and real MCP tool name) |
+| `<server>` | One namespace per connected MCP server, e.g. `everything.get_sum(...)`; see [MCP servers](#mcp-servers) |
 
 Files in the workspace appear as downloadable artifacts in the UI.
+
+## MCP servers
+
+AgentOS follows the [Code Mode post](https://blog.cloudflare.com/code-mode/): MCP tools are **not** given to the model as tools. The agent connects to each server, converts its tools into a TypeScript API, and programs call that API. The model still sees exactly one tool, `codemode`, and the server's credentials stay in the agent, which plays the role of the post's "bindings".
+
+```
+mcp.json ──▶ MCP client (@modelcontextprotocol/sdk) ──tools/list──▶ McpConnector (@cloudflare/codemode)
+                                                                       │ sanitize names, unwrap results
+                                                                       ▼
+                       NamespaceSpec "everything" ──namespaceTypes()──▶ declare const everything: { get_sum(...); ... }
+                                                                       │  (appended to the codemode tool description)
+program: await everything.get_sum({ a: 1, b: 2 }) ──JSON──▶ host ──tools/call "get-sum"──▶ server
+```
+
+**Configure.** Point `MCP_CONFIG_FILE` at a JSON file (relative paths resolve from the repo root), or put the same JSON in `MCP_SERVERS`. Entries in `MCP_SERVERS` override file entries with the same name. The format is the usual `mcpServers` map:
+
+```json
+{
+  "mcpServers": {
+    "everything": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything@2.0.0"]
+    },
+    "docs": {
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" },
+      "namespace": "docs",
+      "timeoutMs": 30000
+    }
+  }
+}
+```
+
+| Field | Transport | Meaning |
+|---|---|---|
+| `command`, `args`, `env`, `cwd` | stdio | Process to start. It gets the SDK's minimal default environment plus `env` |
+| `url`, `headers` | Streamable HTTP | Endpoint and request headers (e.g. auth) |
+| `namespace` | both | Name used in programs. Default: the server name with `-` / `.` turned into `_`. Built-in names (`fs`, `sandbox`, `web`, `codemode`) and JavaScript globals are refused |
+| `description` | both | Shown in the generated types and the UI. Default: the first paragraph of the server's `instructions` |
+| `enabled` | both | `false` keeps the entry but does not connect |
+| `timeoutMs` | both | Per-call timeout (default `MCP_CALL_TIMEOUT_MS`) |
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `MCP_CONFIG_FILE` | unset | Path to the JSON config (`.env.example` sets `mcp.json`) |
+| `MCP_SERVERS` | unset | Inline JSON in the same format |
+| `MCP_CONNECT_TIMEOUT_MS` | `30000` | Start / reach the server, handshake and first `tools/list` |
+| `MCP_CALL_TIMEOUT_MS` | `60000` | Default limit for one tool call |
+| `MCP_RECONNECT_MAX_MS` | `60000` | Longest wait between reconnect attempts |
+
+`${VAR}` in `args`, `env`, `url` and `headers` is filled from the agent's environment (`.env`), so the config file holds no secrets. If a variable is unset, that server is reported as failed and the others still connect. A malformed file stops startup with a clear error.
+
+**Types.** Each tool's `inputSchema` becomes the input type and its `outputSchema`, when present, the return type, through the same `generateTypesFromJsonSchema` pipeline as the built-in tools. Tool names that are not JavaScript identifiers are sanitized (`get-sum` → `get_sum`, `files.list` → `files_list`, collisions get `_2`), and the real MCP name is kept for the call. Tools without an output schema return `McpToolResult`: the text output, JSON-parsed when it is JSON, or the raw `{ content: [...] }` when it contains images, audio or resources.
+
+**Calls.** `structuredContent` is returned as is. `isError` results and transport errors (timeouts, a dropped connection) are thrown inside the program as `Error("<server>/<mcp tool>: <message>")`, so the program can catch them. Arguments are checked against the input schema before the call. Works the same with `CODEMODE_EXECUTOR=local` and `docker`.
+
+**Lifecycle.** Servers connect in the background at startup (`MCP_CONNECT_TIMEOUT_MS` per attempt). A failed or dropped server is retried with exponential backoff up to `MCP_RECONNECT_MAX_MS`; until it is back, new runs do not see its namespace. A run snapshots the namespaces when it starts, so a server changing mid-run cannot change the tool definition between two LLM calls. The first run after startup waits for servers that are still connecting. `tools/list_changed` notifications update the namespace for later runs.
+
+**Where it shows.** `GET /api/status` → `mcp.servers` (state, error, tool count, server name and version, next retry). `GET /api/tools` lists MCP namespaces with `source: "mcp"`, their generated TypeScript and each tool's `mcpName`. The sidebar's tool catalog has an **MCP servers** group with a health dot per server and the error inline when one is down. The How it works page has an MCP walkthrough with real payloads from `server-everything`.
 
 ## UI
 
 - **How it works** (`/#how-it-works`, linked from the header and the empty state): a scripted, step-by-step replay of one run, with a failover toggle. "Try it yourself" opens the workspace with the demo prompt filled in.
-- **Left sidebar:** sessions, tool catalog, executor and sandbox status.
+- **Left sidebar:** sessions, tool catalog (built-in namespaces and MCP servers with a health dot), executor and sandbox status.
 - **Centre:** the chat. Answers are rendered as Markdown and tagged with the model that wrote them. Each execution card shows the program, tool-call chips, sandbox output and return value. Retry and failover notices appear inline.
 - **Right inspector** has five tabs:
   - **Timeline:** every execution event, live.
@@ -328,14 +398,16 @@ npm run test:smoke       # real API calls: Groq / Gemini when keys are set, Olla
 9. Code Mode tool calling works on both providers
 10. Executed code is never duplicated: re-emitted after a switch, interrupted mid-stream, or with the same tool-call id
 
+`workers/agent/test/mcp/mcp.test.ts` runs a test MCP server built with the SDK in-process, as a stdio process and over Streamable HTTP on `127.0.0.1`. It covers config parsing and `${VAR}` filling, the generated TypeScript and name mapping, calls from programs (structured, text, JSON text), `isError` and timeouts as thrown errors, a full agent run through the mock LLM, a server that is down at startup, reconnects, `tools/list_changed`, the Docker executor, and that programs, `/api/status` and `/api/tools` never see MCP credentials.
+
 The other suites cover error classification, retry and health, structured output, Gemini history conversion, executor escape attempts and limits, Docker sandbox isolation (network, read-only fs, timeout), workspace path safety and the package allowlist.
 
 ## API
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/status` | Provider health, executor, sandbox |
-| GET | `/api/tools` | Namespaces with generated TypeScript |
+| GET | `/api/status` | Provider health, executor, sandbox, MCP servers |
+| GET | `/api/tools` | Namespaces (built-in and MCP) with generated TypeScript, plus `mcpServers` |
 | GET/POST/DELETE | `/api/sessions[/:id]` | Sessions (GET includes messages, runs, executions) |
 | POST | `/api/sessions/:id/messages` | Start a run → `{ runId }` |
 | POST | `/api/runs/:id/cancel` | Cancel a run |

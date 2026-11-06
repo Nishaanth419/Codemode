@@ -16,20 +16,42 @@ import { bindProviders } from "../tools/registry.js";
 
 export const CODEMODE_TOOL_NAME = "codemode";
 
+/**
+ * Shared result type for MCP tools without an `outputSchema`. It matches what
+ * McpConnector's unwrapping returns (see mcp/namespace.ts).
+ */
+export const MCP_RESULT_TYPES = `/** Result of an MCP tool that declares no output schema: its text output (JSON-parsed when the text is JSON), or the raw MCP result when it contains images, audio or resources. */
+type McpToolResult = string | number | boolean | null | unknown[] | { [key: string]: unknown } | { content: McpContent[] };
+type McpContent =
+    | { type: "text"; text: string }
+    | { type: "image" | "audio"; data: string; mimeType: string }
+    | { type: "resource" | "resource_link"; [key: string]: unknown };`;
+
+const MCP_RESULT_MARKER = "__agentos_mcp_tool_result__";
+
 /** TypeScript declarations for one namespace, e.g. `declare const sandbox: {...}`. */
-export function namespaceTypes(ns: NamespaceSpec): string {
+export function namespaceTypes(ns: NamespaceSpec, opts: { sharedTypes?: boolean } = {}): string {
+  const mcp = ns.source === "mcp";
+  let untyped = false;
   const descriptors = Object.fromEntries(
-    Object.entries(ns.tools).map(([name, t]) => [
-      name,
-      { description: t.description, inputSchema: t.inputSchema, outputSchema: t.outputSchema }
-    ])
+    Object.entries(ns.tools).map(([name, t]) => {
+      let outputSchema = t.outputSchema;
+      if (!outputSchema && mcp) {
+        untyped = true;
+        outputSchema = { type: "string", enum: [MCP_RESULT_MARKER] };
+      }
+      return [name, { description: t.description, inputSchema: t.inputSchema, outputSchema }];
+    })
   );
-  const types = generateTypesFromJsonSchema(descriptors as never);
-  return `/** ${ns.description} */\n${types.replace(/declare const codemode\s*:/, `declare const ${ns.name}:`)}`;
+  const types = generateTypesFromJsonSchema(descriptors as never).replaceAll(`"${MCP_RESULT_MARKER}"`, "McpToolResult");
+  const shared = untyped && (opts.sharedTypes ?? true) ? `${MCP_RESULT_TYPES}\n` : "";
+  return `/** ${ns.description.replace(/\*\//g, "*\\/")} */\n${shared}${types.replace(/declare const codemode\s*:/, `declare const ${ns.name}:`)}`;
 }
 
 export function buildTypesBlock(namespaces: NamespaceSpec[]): string {
-  return namespaces.map(namespaceTypes).join("\n\n");
+  const needsShared = namespaces.some((ns) => ns.source === "mcp" && Object.values(ns.tools).some((t) => !t.outputSchema));
+  const blocks = namespaces.map((ns) => namespaceTypes(ns, { sharedTypes: false }));
+  return [...(needsShared ? [MCP_RESULT_TYPES] : []), ...blocks].join("\n\n");
 }
 
 export function buildCodeToolDefinition(namespaces: NamespaceSpec[]): ToolDefinition {
@@ -72,7 +94,7 @@ export async function executeCodeMode(opts: {
   observer?: ToolObserver;
 }): Promise<CodeExecutionOutcome> {
   const started = Date.now();
-  const providers = bindProviders(opts.namespaces, opts.ctx, opts.observer);
+  const providers = bindProviders(opts.namespaces, { catalog: opts.namespaces, ...opts.ctx }, opts.observer);
   try {
     const out = await runCode({ code: opts.code, executor: opts.executor, providers });
     return { ok: true, result: out.result, logs: out.logs ?? [], durationMs: Date.now() - started };

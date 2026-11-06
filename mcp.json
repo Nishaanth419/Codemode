@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "everything": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything@2.0.0"],
+      "description": "Reference MCP server with demo tools (echo, get-sum, structured content, errors). No API key needed."
+    }
+  }
+}

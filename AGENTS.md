@@ -4,7 +4,7 @@ Guidance for AI coding agents (and humans) working in this repository. Read this
 
 ## What this is
 
-AgentOS is a Code Mode agent. The LLM gets **one tool**, `codemode({ code })`, and writes a single JavaScript program that calls typed host tools (`fs`, `sandbox`, `web`, `codemode`). The program runs in an isolated executor; Python / Node.js / bash run in a Docker sandbox. LLM calls go through a provider router with Groq → Gemini → (Ollama) failover.
+AgentOS is a Code Mode agent. The LLM gets **one tool**, `codemode({ code })`, and writes a single JavaScript program that calls typed host tools (`fs`, `sandbox`, `web`, `codemode`, plus one namespace per connected MCP server). The program runs in an isolated executor; Python / Node.js / bash run in a Docker sandbox. LLM calls go through a provider router with Groq → Gemini → (Ollama) failover.
 
 ## Repository map
 
@@ -18,16 +18,21 @@ workers/agent/            Node backend (Express 5, TypeScript, node:sqlite)
   src/providers/          provider interface, Groq/Gemini/Ollama adapters, errors, retry, router, health
   src/codemode/           codemode tool definition + type generation, executors, executor router
   src/tools/registry.ts   host tools exposed to programs, arg validation, call observer
+  src/mcp/                MCP servers → namespaces: config.ts (mcp.json / MCP_SERVERS, ${VAR}),
+                          connection.ts (SDK client, stdio / Streamable HTTP, reconnect),
+                          namespace.ts (McpConnector → NamespaceSpec), manager.ts (all servers, status)
   src/sandbox/            Docker runner, workspace path safety, package allowlist
   src/db/database.ts      SQLite schema and queries
   src/shims/              maps `cloudflare:workers` to a local shim so @cloudflare/codemode loads on Node
-  test/                   vitest suites; test/helpers has the mock LLM and harness
+  test/                   vitest suites; test/helpers has the mock LLM and harness;
+                          test/mcp/fixtures/test-server.mjs is an SDK-built MCP server for tests
 apps/web/                 React 19 + Vite + Tailwind v4 + shadcn-style UI
   src/main.tsx            hash router: `#how-it-works` → demo page, otherwise the workspace
   src/App.tsx             workspace shell (sidebar, chat, inspector)
   src/components/how-it-works.tsx   scripted, offline walkthrough of one run
   src/hooks/use-agent.ts  status polling + SSE session stream
   src/lib/timeline.ts     reducer that turns events into chat items (tested)
+mcp.json                  MCP server config (keyless demo: @modelcontextprotocol/server-everything)
 sandbox/
   Dockerfile              agentos-sandbox image (Python 3, Node 24, bash)
   codemode-runtime.mjs    the program runtime used by BOTH executors
@@ -52,16 +57,17 @@ Before saying a change is done: `npm run typecheck && npm test`. If you touched 
 
 ## Invariants: do not break these
 
-1. **One tool.** The LLM only ever sees `codemode`. New capabilities are new functions inside a namespace in `tools/registry.ts`, never new top-level LLM tools.
+1. **One tool.** The LLM only ever sees `codemode`. New capabilities are new functions inside a namespace in `tools/registry.ts`, never new top-level LLM tools. MCP tools are no exception: they become a namespace in the tool description, never LLM tools.
 2. **The router never runs code.** `providers/` only talks to models. Execution happens in `agent-runner.ts` after a provider call has fully succeeded. Partially streamed tool calls are discarded.
 3. **A program never runs twice.** Executions are keyed by `(run_id, tool_call_id)` and deduplicated by code hash after a provider switch (`handleToolCall`). Keep both checks if you touch that code.
 4. **No silent fallback on configuration errors.** `auth`, `bad_request`, `model_not_found` and `context_length` stop the run with a visible error. Only transient kinds (`rate_limit`, `quota_exhausted`, 5xx, timeout, network, malformed tool call) fail over. See the table in `providers/errors.ts`.
-5. **Same agent on every provider.** Every provider gets the identical system prompt (`agent/prompts.ts`), the full persisted history and the same tool definition. Provider-specific wire details (Gemini thought signatures, OpenAI-style tool calls) stay inside the adapters.
-6. **Keys stay on the server.** The browser only sees provider names, models and health. No OpenAI or Anthropic credentials are used anywhere.
+5. **Same agent on every provider.** Every provider gets the identical system prompt (`agent/prompts.ts`), the full persisted history and the same tool definition. The namespaces (built-in + connected MCP servers) are snapshotted once per run, so an MCP server connecting or dropping cannot change the tool definition mid-run. Provider-specific wire details (Gemini thought signatures, OpenAI-style tool calls) stay inside the adapters.
+6. **Keys stay on the server.** The browser only sees provider names, models and health. No OpenAI or Anthropic credentials are used anywhere. MCP credentials (`env`, `headers`, `${VAR}` values) live only in `mcp/connection.ts`: programs get typed stubs and JSON, the UI gets the config's command or URL with placeholders and without query strings, and stdio servers get the SDK's minimal default environment plus their own `env`, never `process.env`.
 7. **Isolation is not optional.** The program context has no `require`, `import`, `process`, `fetch`, `eval` or WebAssembly, and only JSON strings cross the boundary. Sandbox containers keep `--network none`, `--read-only`, `--cap-drop ALL`, `no-new-privileges` and resource limits. `web.fetch` blocks private, loopback, link-local and metadata addresses, including after redirects. `fs.*` rejects path traversal and symlink escapes.
 8. **Package installs are allowlisted and binary-only.** `SANDBOX_ALLOWED_PACKAGES`; argv only, no shell; pip `--only-binary=:all:` (the sandbox is Debian/glibc so manylinux wheels exist; source builds cannot work there); npm with `--ignore-scripts`.
 9. **Events are the contract with the UI.** Persisted events in SQLite are replayed over SSE with `Last-Event-ID`. If you add or rename an event type, update `apps/web/src/lib/timeline.ts` and its test.
-10. **The final step never executes tools.** On the last allowed step the runner sends `toolChoice: "none"` and drops any tool calls the model still returns. Timeouts measure the program's own run time; host tool waits are excluded, bounded by `CODEMODE_MAX_WALL_MS`.
+10. **An MCP server never blocks the agent.** Config syntax errors stop startup, but an unreachable server, a failed handshake or an unset `${VAR}` only marks that server failed (visible in `/api/status` and the sidebar) and it is retried with backoff.
+11. **The final step never executes tools.** On the last allowed step the runner sends `toolChoice: "none"` and drops any tool calls the model still returns. Timeouts measure the program's own run time; host tool waits are excluded, bounded by `CODEMODE_MAX_WALL_MS`.
 
 ## Common changes
 
@@ -71,16 +77,18 @@ Before saying a change is done: `npm run typecheck && npm test`. If you touched 
 
 **Change the executor.** Both executors implement `@cloudflare/codemode`'s `Executor` and share `sandbox/codemode-runtime.mjs`. Choose between them in `codemode/execution-router.ts`. A Cloudflare Workers deployment would add a `DynamicWorkerExecutor` there.
 
+**Add an MCP server.** Add an entry to `mcp.json` (or `MCP_SERVERS`): `command` / `args` / `env` for stdio, `url` / `headers` for Streamable HTTP. Put tokens in `.env` and reference them as `${VAR}`; never write a token into `mcp.json`. Pin `npx` packages to an exact version. Restart the agent and check `GET /api/status` → `mcp.servers` and the sidebar. No code changes are needed: tools, types and the prompt follow from `tools/list`. If the server name collides with a built-in namespace or a JS global, set `namespace`. To change how MCP tools map to the program API (names, result unwrapping, errors), edit `mcp/namespace.ts` and `test/mcp/mcp.test.ts`.
+
 **Change the system prompt.** `agent/prompts.ts`. Keep rule 0 (always execute through the tool, never paste a program in the reply). `looksLikeUnexecutedProgram` in `agent-runner.ts` nudges the model once if it does.
 
-**Change the How it works page.** It is fully scripted (no backend calls) so it works without API keys. If you change the real flow, event names, limits or payload shapes, update the `STEPS` in `how-it-works.tsx` to match. Every payload on that page should be something the code actually produces.
+**Change the How it works page.** It is fully scripted (no backend calls) so it works without API keys. If you change the real flow, event names, limits or payload shapes, update the `STEPS` in `how-it-works.tsx` to match. Every payload on that page should be something the code actually produces. The MCP walkthrough (`MCP_STEPS`) shows real payloads from `server-everything@2.0.0`; regenerate them if you change `mcp/namespace.ts`, `namespaceTypes` or the pinned server version.
 
 ## Conventions
 
 - Node ≥ 22.13 (`node:sqlite`), ESM everywhere. Backend imports use the `.js` suffix on relative paths.
 - The backend starts with `tsx --import ./src/shims/register.ts`. Without the shim, `@cloudflare/codemode` fails to import `cloudflare:workers`.
 - Validate external input with zod (`config.ts`, request bodies in `server.ts`).
-- Tests never hit the network. Use `test/helpers/mock-llm.ts` and the injected `fetch`. Docker-dependent tests skip when Docker is unavailable.
+- Tests never hit the network. Use `test/helpers/mock-llm.ts` and the injected `fetch`. MCP tests use `test/mcp/fixtures/test-server.mjs` in-process (`AppOverrides.mcpTransport`), over stdio, or on `127.0.0.1`. Docker-dependent tests skip when Docker is unavailable.
 - UI: use the design tokens in `apps/web/src/index.css` (obsidian / lime / paper), the primitives in `components/ui/`, `lucide-react` icons and the `@/` import alias. Layout must work from 375 px up.
 - Keep comments for the *why*. File headers in this repo explain each module's role; keep them accurate.
 
@@ -88,4 +96,5 @@ Before saying a change is done: `npm run typecheck && npm test`. If you touched 
 
 - Without Groq / Gemini keys you can still run everything with `OLLAMA_ENABLED=true` and a local Ollama (`gpt-oss:20b`).
 - Data (SQLite db, session workspaces) lives in `.data/` and is gitignored.
+- `mcp.json` starts `server-everything` with `npx -y`, which downloads it on first start (a few seconds, needs network once). It connects in the background; until then, `/api/status` shows it as `connecting`.
 - The agent container controls the host Docker daemon through `/var/run/docker.sock` to start sibling sandbox containers. That is fine locally and not acceptable for multi-tenant hosting.

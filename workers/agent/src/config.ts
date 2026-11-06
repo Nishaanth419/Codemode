@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { loadMcpServers, type McpServerConfig } from "./mcp/config.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(here, "../../..");
@@ -70,6 +71,16 @@ const EnvSchema = z.object({
       "pip:requests,pip:numpy,pip:pandas,pip:matplotlib,pip:pyyaml,pip:beautifulsoup4,pip:python-dateutil,npm:lodash,npm:dayjs,npm:zod,npm:csv-parse,npm:yaml,npm:marked"
     ),
 
+  // MCP servers: a JSON file (relative paths resolve from the repo root) and/or inline JSON.
+  MCP_CONFIG_FILE: optionalString,
+  MCP_SERVERS: optionalString,
+  // Spawning / reaching a server, the handshake and the first tools/list.
+  MCP_CONNECT_TIMEOUT_MS: int(30_000),
+  // Default limit for one MCP tool call (a server's "timeoutMs" overrides it).
+  MCP_CALL_TIMEOUT_MS: int(60_000),
+  // Longest wait between reconnect attempts to a failed server.
+  MCP_RECONNECT_MAX_MS: int(60_000),
+
   DATA_DIR: z.string().default(path.join(REPO_ROOT, ".data")),
   /** Host path of DATA_DIR, needed when the agent itself runs inside Docker and starts sibling sandbox containers. */
   WORKSPACE_HOST_DIR: optionalString,
@@ -77,7 +88,10 @@ const EnvSchema = z.object({
   CORS_ORIGIN: z.string().default("http://localhost:5173")
 });
 
-export type AppConfig = z.infer<typeof EnvSchema>;
+export type AppConfig = z.infer<typeof EnvSchema> & {
+  /** Parsed MCP_CONFIG_FILE + MCP_SERVERS, with `${VAR}` placeholders filled from the environment. */
+  mcpServers: McpServerConfig[];
+};
 export type ProviderName = z.infer<typeof providerName>;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -86,5 +100,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     const issues = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
     throw new Error(`Invalid configuration: ${issues}`);
   }
-  return parsed.data;
+  let mcpServers: McpServerConfig[];
+  try {
+    mcpServers = loadMcpServers({ file: parsed.data.MCP_CONFIG_FILE, inline: parsed.data.MCP_SERVERS, baseDir: REPO_ROOT, env });
+  } catch (err) {
+    throw new Error(`Invalid configuration: ${(err as Error).message}`);
+  }
+  return { ...parsed.data, mcpServers };
 }

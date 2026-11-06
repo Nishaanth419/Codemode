@@ -1,6 +1,8 @@
 /**
  * HTTP API + Server-Sent Events. API keys never leave the server: the frontend
- * only ever sees provider names, models and health status.
+ * only ever sees provider names, models and health status. For MCP servers it sees the
+ * name, command or URL as written in the config (no env values, headers or query strings),
+ * health and tool list.
  */
 import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -37,7 +39,8 @@ export function createServer(ctx: AppContext) {
       quotaNote: "Remaining quota is not reported by Groq or Gemini free-tier APIs, so it is not shown."
     },
     executor: ctx.executionRouter.info,
-    sandbox: ctx.sandboxStatus()
+    sandbox: ctx.sandboxStatus(),
+    mcp: { servers: ctx.mcp.status() }
   });
 
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
@@ -46,12 +49,20 @@ export function createServer(ctx: AppContext) {
 
   app.get("/api/tools", (_req, res) => {
     res.json({
-      namespaces: ctx.namespaces.map((ns) => ({
+      namespaces: ctx.toolNamespaces().map((ns) => ({
         name: ns.name,
         description: ns.description,
+        source: ns.source ?? "builtin",
+        server: ns.server ?? null,
         types: namespaceTypes(ns),
-        tools: Object.entries(ns.tools).map(([name, t]) => ({ name, description: t.description, inputSchema: t.inputSchema }))
+        tools: Object.entries(ns.tools).map(([name, t]) => ({
+          name,
+          description: t.description,
+          inputSchema: t.inputSchema,
+          ...(t.mcpName ? { mcpName: t.mcpName } : {})
+        }))
       })),
+      mcpServers: ctx.mcp.status(),
       allowedPackages: ctx.packages.allowlist()
     });
   });
@@ -125,10 +136,12 @@ export function createServer(ctx: AppContext) {
       }, 150);
     };
     ctx.router.health.on("change", onHealth);
+    ctx.mcp.on("change", onHealth);
     const heartbeat = setInterval(() => res.write(`: ping\n\n`), 15_000);
     req.on("close", () => {
       unsubscribe();
       ctx.router.health.off("change", onHealth);
+      ctx.mcp.off("change", onHealth);
       clearInterval(heartbeat);
       if (pending) clearTimeout(pending);
     });
