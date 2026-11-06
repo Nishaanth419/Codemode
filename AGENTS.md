@@ -33,6 +33,8 @@ apps/web/                 React 19 + Vite + Tailwind v4 + shadcn-style UI
   src/hooks/use-agent.ts  status polling + SSE session stream
   src/lib/timeline.ts     reducer that turns events into chat items (tested)
 mcp.json                  MCP server config (keyless demo: @modelcontextprotocol/server-everything)
+docs/
+  architecture.html       Archify architecture diagram (README embeds docs/images/*.png)
 sandbox/
   Dockerfile              agentos-sandbox image (Python 3, Node 24, bash)
   codemode-runtime.mjs    the program runtime used by BOTH executors
