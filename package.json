@@ -8,7 +8,7 @@
     "apps/web"
   ],
   "scripts": {
-    "dev": "npm run dev --workspaces --if-present",
+    "dev": "./run.sh",
     "dev:agent": "npm run dev -w workers/agent",
     "dev:web": "npm run dev -w apps/web",
     "build": "npm run build --workspaces --if-present",

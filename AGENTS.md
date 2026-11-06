@@ -48,7 +48,7 @@ Run from the repository root.
 |---|---|
 | Install | `npm install` |
 | Build sandbox image | `npm run sandbox:build` |
-| Dev (agent :8787 + web :5173) | `npm run dev` |
+| Dev (agent :8787 + web :5173) | `./run.sh` (= `npm run dev`); `./run.sh check` for prerequisites only |
 | One side only | `npm run dev:agent` / `npm run dev:web` |
 | All tests (no network) | `npm test` |
 | Real-provider smoke tests | `npm run test:smoke` (only runs providers that have keys / are reachable) |

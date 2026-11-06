@@ -16,11 +16,21 @@ An AI workspace where you describe a task in natural language, and an LLM writes
 Requirements: Node ≥ 22.13 (uses built-in `node:sqlite`), Docker, and at least one of a Groq key, a Gemini key, or a local Ollama.
 
 ```bash
-npm install
-npm run sandbox:build          # builds agentos-sandbox:latest (Python 3 + Node 24 + bash)
-cp .env.example .env           # add GROQ_API_KEY and/or GEMINI_API_KEY
-npm run dev                    # agent on :8787, web on :5173
+./run.sh
 ```
+
+That is the whole setup. `run.sh` checks Node, installs dependencies when `package-lock.json` changed, creates `.env` from `.env.example` on first run, builds the sandbox image, checks the ports, then starts the agent (:8787) and the web UI (:5173) together with labelled logs. Add your `GROQ_API_KEY` and/or `GEMINI_API_KEY` to `.env`. Ctrl+C stops both.
+
+| Command | What it does |
+|---|---|
+| `./run.sh` | Check prerequisites, start agent + web |
+| `./run.sh --open` | Same, then open the UI in your browser |
+| `./run.sh check` | Only the checks; also lists settings from `.env.example` missing in your `.env` |
+| `./run.sh test` | Typecheck + all tests |
+| `./run.sh docker` | Full stack with Docker Compose |
+| `AGENT_PORT=8788 WEB_PORT=5174 ./run.sh` | Use other ports |
+
+`npm run dev` runs the same script. Manual steps, if you prefer: `npm install`, `npm run sandbox:build`, `cp .env.example .env`, then `npm run dev:agent` and `npm run dev:web` in two terminals.
 
 `.env.example` sets `MCP_CONFIG_FILE=mcp.json`, which connects the keyless demo MCP server (`@modelcontextprotocol/server-everything`, started with `npx`). Remove the line to run without MCP.
 
@@ -196,7 +206,7 @@ The `local` executor is a development adapter: `node:vm` is not a security bound
 
 ### Deployment
 
-- **Local dev:** `npm run dev`. Agent on `127.0.0.1:8787`, Vite on `:5173` proxying `/api`.
+- **Local dev:** `./run.sh` (or `npm run dev`). Agent on `127.0.0.1:8787`, Vite on `:5173` proxying `/api`.
 - **Docker Compose:** nginx serves the web build and proxies `/api` to the agent container. The agent starts sandbox containers as siblings through the host Docker socket (`WORKSPACE_HOST_DIR` maps the data dir for mounts).
 - **Cloudflare Workers (future):** the agent and executors already speak `@cloudflare/codemode`'s `Executor` interface. Moving means adding a `DynamicWorkerExecutor` in `codemode/execution-router.ts` and replacing SQLite / Docker with Workers equivalents; the agent loop does not change.
 
