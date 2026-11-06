@@ -4,19 +4,12 @@ An AI workspace where you describe a task in natural language, and an LLM writes
 
 **New here?** Open the **How it works** page in the app (`/#how-it-works`), then read [System design](#system-design). Contributors and coding agents: see [AGENTS.md](AGENTS.md).
 
-```
-React workspace ──SSE──▶ Agent backend ──▶ LLM router ──▶ Groq ─(fails over)─▶ Gemini ─▶ (Ollama, optional)
- (Vite, Tailwind,          (Express, Zod,      │
-  shadcn/ui, Monaco)        SQLite)            ▼  one `codemode` tool call: { code }
-                                          Code Mode (@cloudflare/codemode: types, normalizeCode, runCode)
-                                               │
-                                          Execution router ──▶ local worker-isolate executor   (default, dev)
-                                               │           └─▶ Docker container executor       (CODEMODE_EXECUTOR=docker)
-                                               ▼  tool calls from the program
-                                          fs.* · sandbox.runPython/runNode/runShell/installPackage · web.fetch · codemode.searchTools
-                                          <server>.* (one namespace per MCP server) ──▶ MCP client ──▶ stdio / Streamable HTTP servers
-                                                         └─▶ Docker sandbox (no network, read-only, limits)
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.png">
+  <img alt="AgentOS architecture: web workspace, agent backend (server, AgentRunner, ProviderRouter, codemode tool, executors, host tools, MCP client), LLM providers, MCP servers and the Docker sandbox" src="docs/images/architecture-light.png">
+</picture>
+
+**Interactive version:** [docs/architecture.html](docs/architecture.html) (download and open it in a browser for zoom, search, dark/light themes, motion and source links to each component).
 
 ## Quick start
 
@@ -66,6 +59,8 @@ Classic tool calling makes the model emit one JSON tool call, wait for the resul
 | Intermediate results in context | all of them | only what the program returns |
 
 ### Components
+
+The [interactive architecture diagram](docs/architecture.html) shows the same components with links to their source. The Mermaid view below renders directly on GitHub.
 
 ```mermaid
 flowchart LR
