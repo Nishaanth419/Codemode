@@ -32,7 +32,7 @@ apps/web/                 React 19 + Vite + Tailwind v4 + shadcn-style UI
   src/components/how-it-works.tsx   scripted, offline walkthrough of one run
   src/hooks/use-agent.ts  status polling + SSE session stream
   src/lib/timeline.ts     reducer that turns events into chat items (tested)
-mcp.json                  MCP server config (keyless demo: @modelcontextprotocol/server-everything)
+mcp.json                  MCP server config (demo: Alpha Vantage over Streamable HTTP, 8 tools allowlisted)
 docs/
   architecture.html       Archify architecture diagram (README embeds docs/images/*.png)
 sandbox/
@@ -79,11 +79,11 @@ Before saying a change is done: `npm run typecheck && npm test`. If you touched 
 
 **Change the executor.** Both executors implement `@cloudflare/codemode`'s `Executor` and share `sandbox/codemode-runtime.mjs`. Choose between them in `codemode/execution-router.ts`. A Cloudflare Workers deployment would add a `DynamicWorkerExecutor` there.
 
-**Add an MCP server.** Add an entry to `mcp.json` (or `MCP_SERVERS`): `command` / `args` / `env` for stdio, `url` / `headers` for Streamable HTTP. Put tokens in `.env` and reference them as `${VAR}`; never write a token into `mcp.json`. Pin `npx` packages to an exact version. Restart the agent and check `GET /api/status` → `mcp.servers` and the sidebar. No code changes are needed: tools, types and the prompt follow from `tools/list`. If the server name collides with a built-in namespace or a JS global, set `namespace`. To change how MCP tools map to the program API (names, result unwrapping, errors), edit `mcp/namespace.ts` and `test/mcp/mcp.test.ts`.
+**Add an MCP server.** Add an entry to `mcp.json` (or `MCP_SERVERS`): `command` / `args` / `env` for stdio, `url` / `headers` for Streamable HTTP. Put tokens in `.env` and reference them as `${VAR}`; never write a token into `mcp.json`. Pin `npx` packages to an exact version. For servers with many tools, set `tools` to an allowlist of exact MCP tool names: only those reach the types, the prompt and `searchTools` (Alpha Vantage has 133, the demo exposes 8). Put provider rules the model must follow (rate limits, required params) in the entry's `description`, which lands in the namespace types. Restart the agent and check `GET /api/status` → `mcp.servers` and the sidebar. No code changes are needed: tools, types and the prompt follow from `tools/list`. If the server name collides with a built-in namespace or a JS global, set `namespace`. To change how MCP tools map to the program API (names, result unwrapping, errors), edit `mcp/namespace.ts` and `test/mcp/mcp.test.ts`.
 
 **Change the system prompt.** `agent/prompts.ts`. Keep rule 0 (always execute through the tool, never paste a program in the reply). `looksLikeUnexecutedProgram` in `agent-runner.ts` nudges the model once if it does.
 
-**Change the How it works page.** It is fully scripted (no backend calls) so it works without API keys. If you change the real flow, event names, limits or payload shapes, update the `STEPS` in `how-it-works.tsx` to match. Every payload on that page should be something the code actually produces. The MCP walkthrough (`MCP_STEPS`) shows real payloads from `server-everything@2.0.0`; regenerate them if you change `mcp/namespace.ts`, `namespaceTypes` or the pinned server version.
+**Change the How it works page.** It is fully scripted (no backend calls) so it works without API keys. If you change the real flow, event names, limits or payload shapes, update the `STEPS` in `how-it-works.tsx` to match. Every payload on that page should be something the code actually produces. The main walkthrough is an abridged, recorded run of `DEMO_PROMPT` (Alpha Vantage quote and prices, pandas in the sandbox); re-record it (run the prompt, read the events from `GET /api/sessions/:id/events`) if the flow or the system prompt changes. The MCP walkthrough (`MCP_STEPS`) shows real payloads from the Alpha Vantage server; regenerate them (`tools/list`, `GET /api/tools`) if you change `mcp/namespace.ts`, `namespaceTypes`, the `tools` allowlist in `mcp.json` or the server's description. Recording costs live API calls (Alpha Vantage free keys: 25 per day).
 
 ## Conventions
 
@@ -98,5 +98,5 @@ Before saying a change is done: `npm run typecheck && npm test`. If you touched 
 
 - Without Groq / Gemini keys you can still run everything with `OLLAMA_ENABLED=true` and a local Ollama (`gpt-oss:20b`).
 - Data (SQLite db, session workspaces) lives in `.data/` and is gitignored.
-- `mcp.json` starts `server-everything` with `npx -y`, which downloads it on first start (a few seconds, needs network once). It connects in the background; until then, `/api/status` shows it as `connecting`.
+- `mcp.json` connects to the Alpha Vantage MCP server (`https://mcp.alphavantage.co/mcp?apikey=${ALPHAVANTAGE_API_KEY}`). Put a free key in `.env`; without it the server is reported as failed and the rest of the app works. It connects in the background; until then, `/api/status` shows it as `connecting`. Free keys allow 1 request per second and 25 per day, so avoid loops of live calls while developing.
 - The agent container controls the host Docker daemon through `/var/run/docker.sock` to start sibling sandbox containers. That is fine locally and not acceptable for multi-tenant hosting.

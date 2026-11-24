@@ -137,6 +137,25 @@ describe("MCP tools → TypeScript API", () => {
     expect(manager.status()[0]).toMatchObject({ state: "connected", toolCount: 6, server: { name: "agentos-test-server", version: "1.2.3" } });
   });
 
+  it("exposes only the allowlisted tools: types, status and calls stop at the allowlist", async () => {
+    const cfg = servers({ mcpServers: { "test-server": { command: "in-memory", namespace: "weather", tools: ["add", "get-forecast"] } } });
+    expect(cfg[0].tools).toEqual(["add", "get-forecast"]);
+    const { ns, manager } = await connectedManager(cfg);
+    expect(Object.keys(ns.tools).sort()).toEqual(["add", "get_forecast"]);
+    expect(manager.status()[0].toolCount).toBe(2);
+    const types = namespaceTypes(ns);
+    expect(types).toContain("get_forecast");
+    expect(types).not.toContain("print_env");
+    // A program that guesses a hidden tool name cannot reach it.
+    const r = await run("async () => { try { return await weather.print_env({}); } catch (e) { return 'blocked'; } }", [ns]);
+    expect(r.result).toBe("blocked");
+  });
+
+  it("rejects an empty or non-string tools allowlist", () => {
+    expect(() => servers({ a: { command: "x", tools: [] } })).toThrow(/tools/);
+    expect(() => servers({ a: { command: "x", tools: [1] } })).toThrow(/tools/);
+  });
+
   it("generates TypeScript from inputSchema / outputSchema, with McpToolResult when there is no output schema", async () => {
     const { ns } = await connectedManager();
     const types = namespaceTypes(ns);

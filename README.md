@@ -2,6 +2,8 @@
 
 An AI workspace where you describe a task in natural language, and an LLM writes **one JavaScript program** that orchestrates typed tools. The program runs in an isolated executor, calls Python / Node.js / shell inside Docker, and every step is traced live in the UI. This is Cloudflare's **Code Mode** pattern (`@cloudflare/codemode`), running on free-tier and local infrastructure. [MCP servers](#mcp-servers) plug in the same way: each server's tools become a typed TypeScript API that programs call, while the model still sees one tool.
 
+The bundled demo is a **market-data analyst** built on the [Alpha Vantage MCP server](https://mcp.alphavantage.co): the program pulls quotes, prices and news through eight typed Alpha Vantage tools, hands the data to Python (pandas, matplotlib) in a network-less Docker sandbox, and writes a brief or a chart. See [Demo: market data with Alpha Vantage](#demo-market-data-with-alpha-vantage).
+
 **New here?** Open the **How it works** page in the app (`/#how-it-works`), then read [System design](#system-design). Contributors and coding agents: see [AGENTS.md](AGENTS.md).
 
 <picture>
@@ -32,7 +34,7 @@ That is the whole setup. `run.sh` checks Node, installs dependencies when `packa
 
 `npm run dev` runs the same script. Manual steps, if you prefer: `npm install`, `npm run sandbox:build`, `cp .env.example .env`, then `npm run dev:agent` and `npm run dev:web` in two terminals.
 
-`.env.example` sets `MCP_CONFIG_FILE=mcp.json`, which connects the keyless demo MCP server (`@modelcontextprotocol/server-everything`, started with `npx`). Remove the line to run without MCP.
+`.env.example` sets `MCP_CONFIG_FILE=mcp.json`, which connects the Alpha Vantage MCP server. Get a free key at https://www.alphavantage.co/support/#api-key and add `ALPHAVANTAGE_API_KEY=...` to `.env`. Without the key that one server is shown as failed in the sidebar and everything else still works. Remove the `MCP_CONFIG_FILE` line to run without MCP.
 
 Open http://localhost:5173.
 
@@ -45,6 +47,32 @@ WEB_PORT=8088 docker compose up --build      # if port 8080 is taken
 ```
 
 The agent container starts sandbox containers as siblings through `/var/run/docker.sock`. That gives it control of the host Docker daemon, which is fine for local development but not for multi-tenant hosting.
+
+## Demo: market data with Alpha Vantage
+
+The model gets one tool, `codemode`, and a typed `alphavantage` namespace with **8 of Alpha Vantage's 133 tools**, chosen in [mcp.json](mcp.json) with the `tools` allowlist:
+
+| Tool | Use |
+|---|---|
+| `SYMBOL_SEARCH` | Find a ticker from a company name |
+| `GLOBAL_QUOTE` | Latest price and volume |
+| `TIME_SERIES_DAILY` | Daily OHLCV, 100 bars with `outputsize: "compact"` |
+| `COMPANY_OVERVIEW`, `EARNINGS` | Fundamentals |
+| `NEWS_SENTIMENT` | Headlines with sentiment scores |
+| `TOP_GAINERS_LOSERS` | Today's movers |
+| `RSI` | Technical indicator |
+
+A typical run, from the starter prompt "Get MSFT's latest quote and its last 100 daily closes, compute the 20- and 50-day moving averages in Python…": one program calls `alphavantage.GLOBAL_QUOTE` and `alphavantage.TIME_SERIES_DAILY` on the host, writes the JSON with `fs.writeFile`, installs pandas, and runs the analysis in the sandbox, which has no network. The model is called twice: once to write the program and once to write the answer. The **How it works** page replays exactly that run with real payloads.
+
+Things worth knowing about this server (they are also written into the namespace description, so the model sees them):
+
+- **Free-tier limits:** 1 request per second and 25 per day. Programs call tools one at a time with a pause (`await new Promise(r => setTimeout(r, 1100))`), never with `Promise.all`.
+- **`datatype` defaults to CSV.** Passing `datatype: "json"` returns an object the program can use directly.
+- **Errors are data.** A rate limit or an entitlement problem comes back as `{ error: { type, message } }`, not as an exception, so programs check for an `error` key.
+- **Do not pass `entitlement`.** Free keys have no realtime or delayed access.
+- **The key stays on the host.** It is part of the MCP URL the agent holds (`?apikey=${ALPHAVANTAGE_API_KEY}`), never visible to programs, the sandbox or the UI.
+
+Starter prompts in the workspace: a market brief (quotes + news to `brief.md`), a price analysis (moving averages and volatility to a chart), a movers deep-dive (gainers and losers to `movers.csv`, then fundamentals and RSI for the top gainer) and a tool inspection.
 
 ## System design
 
@@ -302,7 +330,7 @@ Neither is Cloudflare's managed **`DynamicWorkerExecutor`**. That one requires t
 | `sandbox` | `runPython`, `runNode`, `runShell` (Docker, no network, workspace mounted at `/workspace`), `installPackage` (pip/npm **allowlist** only; names and versions validated; argv only, no shell; network enabled only for the install; npm `--ignore-scripts`), `listAllowedPackages` |
 | `web` | `fetch`: public http(s) only; private, loopback, link-local and metadata addresses are blocked, including after redirects; 200 KB cap |
 | `codemode` | `searchTools`: tool discovery across built-in and MCP tools (MCP hits include the server and real MCP tool name) |
-| `<server>` | One namespace per connected MCP server, e.g. `everything.get_sum(...)`; see [MCP servers](#mcp-servers) |
+| `<server>` | One namespace per connected MCP server, e.g. `alphavantage.GLOBAL_QUOTE({ symbol: "MSFT", datatype: "json" })`; see [MCP servers](#mcp-servers) |
 
 Files in the workspace appear as downloadable artifacts in the UI.
 
@@ -314,9 +342,9 @@ AgentOS follows the [Code Mode post](https://blog.cloudflare.com/code-mode/): MC
 mcp.json ──▶ MCP client (@modelcontextprotocol/sdk) ──tools/list──▶ McpConnector (@cloudflare/codemode)
                                                                        │ sanitize names, unwrap results
                                                                        ▼
-                       NamespaceSpec "everything" ──namespaceTypes()──▶ declare const everything: { get_sum(...); ... }
+                       NamespaceSpec "alphavantage" ──namespaceTypes()──▶ declare const alphavantage: { GLOBAL_QUOTE(...); ... }
                                                                        │  (appended to the codemode tool description)
-program: await everything.get_sum({ a: 1, b: 2 }) ──JSON──▶ host ──tools/call "get-sum"──▶ server
+program: await alphavantage.GLOBAL_QUOTE({ symbol: "MSFT" }) ──JSON──▶ host ──tools/call "GLOBAL_QUOTE"──▶ server
 ```
 
 **Configure.** Point `MCP_CONFIG_FILE` at a JSON file (relative paths resolve from the repo root), or put the same JSON in `MCP_SERVERS`. Entries in `MCP_SERVERS` override file entries with the same name. The format is the usual `mcpServers` map:
@@ -324,6 +352,10 @@ program: await everything.get_sum({ a: 1, b: 2 }) ──JSON──▶ host ─�
 ```json
 {
   "mcpServers": {
+    "alphavantage": {
+      "url": "https://mcp.alphavantage.co/mcp?apikey=${ALPHAVANTAGE_API_KEY}",
+      "tools": ["SYMBOL_SEARCH", "GLOBAL_QUOTE", "TIME_SERIES_DAILY", "NEWS_SENTIMENT"]
+    },
     "everything": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-everything@2.0.0"]
@@ -344,6 +376,7 @@ program: await everything.get_sum({ a: 1, b: 2 }) ──JSON──▶ host ─�
 | `url`, `headers` | Streamable HTTP | Endpoint and request headers (e.g. auth) |
 | `namespace` | both | Name used in programs. Default: the server name with `-` / `.` turned into `_`. Built-in names (`fs`, `sandbox`, `web`, `codemode`) and JavaScript globals are refused |
 | `description` | both | Shown in the generated types and the UI. Default: the first paragraph of the server's `instructions` |
+| `tools` | both | Allowlist of MCP tool names to expose (exact names). Only these reach the types, the prompt, `codemode.searchTools` and the status count; the rest of the server's tools stay unreachable. Omit it to expose every tool. Alpha Vantage has 133 tools, so the demo exposes 8 |
 | `enabled` | both | `false` keeps the entry but does not connect |
 | `timeoutMs` | both | Per-call timeout (default `MCP_CALL_TIMEOUT_MS`) |
 
@@ -355,19 +388,19 @@ program: await everything.get_sum({ a: 1, b: 2 }) ──JSON──▶ host ─�
 | `MCP_CALL_TIMEOUT_MS` | `60000` | Default limit for one tool call |
 | `MCP_RECONNECT_MAX_MS` | `60000` | Longest wait between reconnect attempts |
 
-`${VAR}` in `args`, `env`, `url` and `headers` is filled from the agent's environment (`.env`), so the config file holds no secrets. If a variable is unset, that server is reported as failed and the others still connect. A malformed file stops startup with a clear error.
+`${VAR}` in `args`, `env`, `url` and `headers` is filled from the agent's environment (`.env`), so the config file holds no secrets. The UI shows a server's URL without its query string, so a key passed as `?apikey=${VAR}` never appears there. If a variable is unset, that server is reported as failed and the others still connect. A malformed file stops startup with a clear error.
 
 **Types.** Each tool's `inputSchema` becomes the input type and its `outputSchema`, when present, the return type, through the same `generateTypesFromJsonSchema` pipeline as the built-in tools. Tool names that are not JavaScript identifiers are sanitized (`get-sum` → `get_sum`, `files.list` → `files_list`, collisions get `_2`), and the real MCP name is kept for the call. Tools without an output schema return `McpToolResult`: the text output, JSON-parsed when it is JSON, or the raw `{ content: [...] }` when it contains images, audio or resources.
 
-**Calls.** `structuredContent` is returned as is. `isError` results and transport errors (timeouts, a dropped connection) are thrown inside the program as `Error("<server>/<mcp tool>: <message>")`, so the program can catch them. Arguments are checked against the input schema before the call. Works the same with `CODEMODE_EXECUTOR=local` and `docker`.
+**Calls.** `structuredContent` is returned as is. Some servers report problems as ordinary results (Alpha Vantage returns `{ error: { type: "rate_limit", ... } }`), so programs should check for that. `isError` results and transport errors (timeouts, a dropped connection) are thrown inside the program as `Error("<server>/<mcp tool>: <message>")`, so the program can catch them. Arguments are checked against the input schema before the call. Works the same with `CODEMODE_EXECUTOR=local` and `docker`.
 
 **Lifecycle.** Servers connect in the background at startup (`MCP_CONNECT_TIMEOUT_MS` per attempt). A failed or dropped server is retried with exponential backoff up to `MCP_RECONNECT_MAX_MS`; until it is back, new runs do not see its namespace. A run snapshots the namespaces when it starts, so a server changing mid-run cannot change the tool definition between two LLM calls. The first run after startup waits for servers that are still connecting. `tools/list_changed` notifications update the namespace for later runs.
 
-**Where it shows.** `GET /api/status` → `mcp.servers` (state, error, tool count, server name and version, next retry). `GET /api/tools` lists MCP namespaces with `source: "mcp"`, their generated TypeScript and each tool's `mcpName`. The sidebar's tool catalog has an **MCP servers** group with a health dot per server and the error inline when one is down. The How it works page has an MCP walkthrough with real payloads from `server-everything`.
+**Where it shows.** `GET /api/status` → `mcp.servers` (state, error, tool count, server name and version, next retry). `GET /api/tools` lists MCP namespaces with `source: "mcp"`, their generated TypeScript and each tool's `mcpName`. The sidebar's tool catalog has an **MCP servers** group with a health dot per server and the error inline when one is down. The How it works page has an MCP walkthrough with real payloads from the Alpha Vantage server.
 
 ## UI
 
-- **How it works** (`/#how-it-works`, linked from the header and the empty state): a scripted, step-by-step replay of one run, with a failover toggle. "Try it yourself" opens the workspace with the demo prompt filled in.
+- **How it works** (`/#how-it-works`, linked from the header and the empty state): a scripted, step-by-step replay of one real Alpha Vantage analysis run (recorded, so it works without keys), with a failover toggle. "Try it yourself" opens the workspace with the demo prompt filled in.
 - **Left sidebar:** sessions, tool catalog (built-in namespaces and MCP servers with a health dot), executor and sandbox status.
 - **Centre:** the chat. Answers are rendered as Markdown and tagged with the model that wrote them. Each execution card shows the program, tool-call chips, sandbox output and return value. Retry and failover notices appear inline.
 - **Right inspector** has five tabs:

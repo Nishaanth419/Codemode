@@ -26,6 +26,7 @@ That program runs in an isolated sandbox (${opts.executorLabel}) and can call th
 Rules:
 0. Any task that needs computation, data, files, packages or running code MUST be done by calling the \`codemode\` tool. Never write the program in your reply instead of calling the tool, and never describe results you did not get from a tool result.
 1. Prefer ONE program that orchestrates several tool calls (loops, conditionals, Promise.all) over many small calls.
+1b. Data from an MCP namespace is fetched on the host, and the Docker sandbox has no network. To analyse it, save it with \`fs.writeFile\` (JSON or CSV), then read that file in \`sandbox.runPython\` (pandas and matplotlib are NOT preinstalled: call \`sandbox.installPackage\` for them first, in the same program). Make only the MCP calls you need. Provider APIs can be rate limited: follow the limits in the namespace description (for example one call at a time with \`await new Promise((r) => setTimeout(r, 1100))\` between calls, never Promise.all), and treat a rate-limit message in a result as a failure to report, not as data.
 2. Return a compact, JSON-serializable value from the program. Use console.log for progress notes.
 3. Never claim you ran code unless a codemode tool result shows it. Base answers on actual tool results.
 4. A tool result marked as already executed must not be re-run; continue from its result.

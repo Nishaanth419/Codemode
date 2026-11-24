@@ -92,7 +92,7 @@ export class McpServerConnection extends EventEmitter {
             onChanged: (err, tools) => {
               if (gen !== this.generation || this.closed) return;
               if (err) return;
-              this.tools = tools ?? [];
+              this.tools = this.allowed(tools ?? []);
               this.emit("change");
             }
           }
@@ -109,7 +109,7 @@ export class McpServerConnection extends EventEmitter {
         return;
       }
       this.client = client;
-      this.tools = tools;
+      this.tools = this.allowed(tools);
       const info = client.getServerVersion();
       this.serverInfo = info ? { name: info.name, version: info.version } : undefined;
       this.instructions = client.getInstructions();
@@ -163,6 +163,12 @@ export class McpServerConnection extends EventEmitter {
       return t;
     }
     return new StreamableHTTPClientTransport(new URL(s.url), { requestInit: { headers: s.headers } });
+  }
+
+  /** Applies the config's tool allowlist, so hidden tools never reach types, prompt or status. */
+  private allowed(tools: Tool[]): Tool[] {
+    const allow = this.config.tools;
+    return allow ? tools.filter((t) => allow.includes(t.name)) : tools;
   }
 
   private lostConnection(reason: string) {

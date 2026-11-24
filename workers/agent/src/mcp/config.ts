@@ -23,6 +23,12 @@ const common = {
   namespace: z.string().trim().min(1).optional(),
   description: z.string().optional(),
   enabled: z.boolean().default(true),
+  /**
+   * Allowlist of this server's tools (exact MCP names). Only these become part of the
+   * namespace, its types and the prompt; the rest of the server's tools stay unreachable.
+   * Omit to expose every tool. Keeps big servers (Alpha Vantage has 133) demo-sized.
+   */
+  tools: z.array(z.string().min(1)).min(1).optional(),
   /** Per-call timeout for this server's tools, overrides MCP_CALL_TIMEOUT_MS. */
   timeoutMs: z.number().int().positive().optional()
 };
@@ -58,6 +64,8 @@ interface BaseServer {
   namespace?: string;
   description?: string;
   enabled: boolean;
+  /** Tool allowlist (MCP names); undefined exposes every tool. */
+  tools?: string[];
   timeoutMs?: number;
   /** Set when the entry cannot be used (e.g. an unset `${VAR}`). Reported in the status. */
   error?: string;
@@ -138,7 +146,7 @@ function resolveServer(name: string, s: ServerEntry, env: NodeJS.ProcessEnv, bas
       if (value === undefined || value === "") missing.add(key);
       return value ?? "";
     });
-  const base = { name, namespace: s.namespace, description: s.description, enabled: s.enabled, timeoutMs: s.timeoutMs };
+  const base = { name, namespace: s.namespace, description: s.description, enabled: s.enabled, tools: s.tools, timeoutMs: s.timeoutMs };
   let out: McpServerConfig;
   if ("command" in s) {
     out = {
