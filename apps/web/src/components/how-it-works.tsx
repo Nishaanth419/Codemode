@@ -35,32 +35,31 @@ import { cn } from "@/lib/utils";
 export const DRAFT_KEY = "agentos.draft";
 
 export const DEMO_PROMPT =
-  "Generate the first 20 prime numbers with Python, save them with their squares to primes.csv, then use a shell one-liner to report the sum of the squares.";
+  "Get MSFT's latest quote and its last 100 daily closes, compute the 20- and 50-day moving averages in Python, and tell me whether the trend is up or down.";
 
+// Abridged from a real run of DEMO_PROMPT on groq/openai/gpt-oss-120b (comments and Python body shortened).
 const PROGRAM = `async () => {
-  const py = await sandbox.runPython({ code: \`
-import csv
-primes, n = [], 2
-while len(primes) < 20:
-    if all(n % p for p in primes): primes.append(n)
-    n += 1
-with open("primes.csv", "w", newline="") as f:
-    w = csv.writer(f)
-    w.writerow(["prime", "square"])
-    w.writerows([p, p * p] for p in primes)
-print(len(primes))
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const quoteRes = await alphavantage.GLOBAL_QUOTE({ symbol: 'MSFT', datatype: 'json' });
+  await sleep(1100);   // free key: 1 request per second
+  const dailyRes = await alphavantage.TIME_SERIES_DAILY({ symbol: 'MSFT', outputsize: 'compact', datatype: 'json' });
+
+  // the Docker sandbox has no network: hand it the data as files
+  await fs.writeFile({ path: 'msft_daily.json', content: JSON.stringify(dailyRes) });
+  await fs.writeFile({ path: 'msft_quote.json', content: JSON.stringify(quoteRes) });
+  await sandbox.installPackage({ manager: 'pip', name: 'pandas' });
+
+  const pyRes = await sandbox.runPython({ timeoutMs: 60000, code: \`
+import json, pandas as pd
+data = json.load(open('msft_daily.json'))
+df = pd.DataFrame.from_dict(data['Time Series (Daily)'], orient='index')
+# ... sort by date, convert to numbers ...
+df['MA20'] = df['close'].rolling(window=20).mean()
+df['MA50'] = df['close'].rolling(window=50).mean()
+# ...
+print(json.dumps(result))
 \` });
-  console.log("python wrote", py.stdout.trim(), "rows");
-
-  const sh = await sandbox.runShell({
-    command: "awk -F, 'NR>1 {s+=$2} END {print s}' primes.csv"
-  });
-
-  return {
-    rows: Number(py.stdout.trim()),
-    sumOfSquares: Number(sh.stdout.trim()),
-    file: "primes.csv"
-  };
+  return JSON.parse(pyRes.stdout.trim());
 }`;
 
 /* ------------------------------------------------------------------ */
@@ -134,6 +133,13 @@ const STEPS: Step[] = [
       content: `// name: "codemode"   input: { code: string }
 // "Execute JavaScript to achieve a goal. These APIs are globals:"
 
+/** Tools from the MCP server "alphavantage" ... (8 of its 133 tools, chosen in mcp.json) */
+declare const alphavantage: {
+  GLOBAL_QUOTE(input: { symbol: string; datatype?: string }): Promise<{ [key: string]: unknown }>;
+  TIME_SERIES_DAILY(input: { symbol: string; outputsize?: string; datatype?: string }): Promise<...>;
+  SYMBOL_SEARCH · COMPANY_OVERVIEW · EARNINGS · NEWS_SENTIMENT · TOP_GAINERS_LOSERS · RSI
+};
+
 /** Run code in an isolated Docker container ... */
 declare const sandbox: {
   runPython(input: { code: string; timeoutMs?: number }):
@@ -180,9 +186,9 @@ declare const codemode: { searchTools(input: { query: string }): Promise<...> };
     tone: "warn",
     body: (
       <>
-        Groq answers <code>429</code> with a daily-quota message. <code>errors.ts</code> classifies it as <code>quota_exhausted</code>, and{" "}
-        <code>retry-policy.ts</code> decides that retrying the same provider is pointless, so the router <strong>fails over</strong>. Groq is skipped
-        until its retry-after time.
+        On a free tier a long prompt can exceed the tokens-per-minute limit. Groq answers <code>429</code>; <code>errors.ts</code> classifies it as{" "}
+        <code>rate_limit</code>, and instead of waiting out the retry-after the router <strong>fails over</strong>. Nothing was executed for this
+        step, so nothing can run twice.
       </>
     ),
     event: "provider.failover",
@@ -190,11 +196,12 @@ declare const codemode: { searchTools(input: { query: string }): Promise<...> };
       label: "router events",
       lang: "json",
       content: `{ "type": "provider.error", "provider": "groq", "willFailover": true,
-  "error": { "kind": "quota_exhausted", "status": 429, ... } }
+  "error": { "kind": "rate_limit", "status": 429, "code": "rate_limit_exceeded",
+             "retryAfterMs": 9000,
+             "summary": "Groq rate limit reached" } }
 
 { "type": "provider.failover", "from": "groq", "to": "gemini",
-  "message": "Groq daily quota exhausted. Switching to Gemini.",
-  "retryAt": "2026-11-06T00:00:00Z" }`
+  "message": "Groq rate limit reached. Switching to Gemini." }`
     }
   },
   {
@@ -214,7 +221,7 @@ declare const codemode: { searchTools(input: { query: string }): Promise<...> };
       lang: "json",
       content: JSON.stringify(
         [
-          { provider: "groq", model: "openai/gpt-oss-120b", status: "rate_limited", retryIn: "57m" },
+          { provider: "groq", model: "openai/gpt-oss-120b", status: "rate_limited", retryIn: "9s" },
           { provider: "gemini", model: "gemini-3.6-flash", status: "active" }
         ],
         null,
@@ -228,8 +235,9 @@ declare const codemode: { searchTools(input: { query: string }): Promise<...> };
     title: "The model writes one program",
     body: (
       <>
-        The model replies with a single <code>codemode</code> tool call. The program chains two sandbox calls, a console log and a return value.
-        Classic tool calling would need a model round trip per tool call; here the model is called once.
+        The model replies with a single <code>codemode</code> tool call. The program fetches a quote and 100 days of prices from Alpha Vantage, pauses
+        1.1 s for the free key's rate limit, writes the data to files, installs pandas and runs the analysis in the sandbox. Classic tool calling
+        would need a model round trip for each of those calls; here the model is called once.
       </>
     ),
     event: "assistant.message",
@@ -263,27 +271,30 @@ the program can see:  sandbox.*  fs.*  web.*  codemode.*  console
   },
   {
     id: "tool-call",
-    active: ["executor", "tools", "docker"],
+    active: ["executor", "tools"],
     title: "Tool calls are forwarded to the host",
     body: (
       <>
-        <code>sandbox.runPython(...)</code> inside the program is just a stub. It sends a JSON message to the host, which runs the real tool:
-        here, Python in a throwaway Docker container with the session workspace mounted.
+        <code>alphavantage.GLOBAL_QUOTE(...)</code> inside the program is just a stub. It sends a JSON message to the host, which calls the MCP server.
+        The API key lives only in the host: it is part of the MCP URL the host holds, and the program never sees it.
       </>
     ),
     event: "tool.call",
     panel: {
-      label: "runtime → host",
+      label: "runtime → host → Alpha Vantage MCP",
       lang: "json",
-      content: `{ "type": "tool-call", "id": "c1",
-  "namespace": "sandbox", "name": "runPython",
-  "args": "{\\"code\\":\\"import csv\\\\nprimes, n = ...\\"}" }
+      content: `{ "type": "tool-call", "id": "exec_5040…:1",
+  "namespace": "alphavantage", "name": "GLOBAL_QUOTE",
+  "args": "{\\"symbol\\":\\"MSFT\\",\\"datatype\\":\\"json\\"}" }
 
-$ docker run --rm --network none --read-only --cap-drop ALL \\
-    --security-opt no-new-privileges --memory 256m --cpus 0.5 --pids-limit 64 \\
-    -v <session-workspace>:/workspace agentos-sandbox python3 -
+// host → MCP server (tools/call, key stays in the host's URL)
+{ "method": "tools/call", "params": { "name": "GLOBAL_QUOTE",
+  "arguments": { "symbol": "MSFT", "datatype": "json" } } }
 
-stdout: 20`
+// tool.result  ok  750ms
+{ "Global Quote": { "01. symbol": "MSFT", "05. price": "492.5000",
+  "06. volume": "30049666", "07. latest trading day": "2026-11-23",
+  "08. previous close": "484.5200", "10. change percent": "1.6470%" } }`
     }
   },
   {
@@ -292,21 +303,28 @@ stdout: 20`
     title: "…and the program keeps going",
     body: (
       <>
-        The result comes back into the program as a normal value. It logs progress and calls <code>sandbox.runShell</code> on the CSV that Python
-        just wrote. Loops, conditionals and <code>Promise.all</code> all work, without involving the model.
+        Results come back as normal values, so the program can pause, call the next API, write files and hand them to Python. The sandbox has no
+        network, so it can only read the files the host put in the workspace. Loops, conditionals and <code>Promise.all</code> work too, without
+        involving the model. Here a one-second pause keeps the free key within its limit.
       </>
     ),
     event: "tool.result",
     panel: {
-      label: "console + second call",
+      label: "console + the rest of the program",
       lang: "text",
-      content: `[log] python wrote 20 rows
+      content: `[log] Fetching latest quote for MSFT
+alphavantage.TIME_SERIES_DAILY  ok  542ms   (100 daily bars)
+fs.writeFile  msft_daily.json  12,416 bytes
+fs.writeFile  msft_quote.json  273 bytes
+sandbox.installPackage  pip pandas  ok  18.9s
 
-sandbox.runShell  awk -F, 'NR>1 {s+=$2} END {print s}' primes.csv
-stdout: 30007
-exitCode: 0     duration: 184ms
+$ docker run --rm --network none --read-only --cap-drop ALL \\
+    --security-opt no-new-privileges --memory 256m --cpus 0.5 --pids-limit 64 \\
+    -v <session-workspace>:/workspace agentos-sandbox python3 -
 
-workspace/primes.csv  (21 lines, shown in Artifacts)`
+stdout: {"latest_price": 492.5, "latest_close": 492.5,
+         "MA20": 520.95125, "MA50": 519.5783, "trend": "up"}
+exitCode: 0     duration: 1.4s`
     }
   },
   {
@@ -324,7 +342,12 @@ workspace/primes.csv  (21 lines, shown in Artifacts)`
       label: "tool message (role: tool)",
       lang: "json",
       content: JSON.stringify(
-        { ok: true, result: { rows: 20, sumOfSquares: 30007, file: "primes.csv" }, logs: ["python wrote 20 rows"], executionId: "exec_2b91…" },
+        {
+          ok: true,
+          result: { latest_price: 492.5, latest_close: 492.5, MA20: 520.95125, MA50: 519.5783, trend: "up" },
+          logs: ["Fetching latest quote for MSFT", "…"],
+          executionId: "exec_5040…"
+        },
         null,
         2
       )
@@ -337,19 +360,24 @@ workspace/primes.csv  (21 lines, shown in Artifacts)`
     body: (
       <>
         A second LLM call sees the tool result and writes the final answer. The answer is tagged with the provider and model that wrote it, and the
-        program, logs and files stay inspectable on the right.
+        program, logs and files stay inspectable on the right. (In this recorded run the second call landed on Ollama after Groq and Gemini
+        were busy; the answer is the model's own reading: the 20-day average is above the 50-day one, which it calls "up".)
       </>
     ),
     event: "run.completed",
     panel: {
       label: "assistant (markdown)",
       lang: "md",
-      content: `I generated the first **20 primes** in Python and saved them with their
-squares to \`primes.csv\`. A shell one-liner summed the squares:
+      content: `The script fetched the latest quote for **MSFT**, computed the 20-day
+and 50-day moving averages from the most recent daily data, and
+determined the short-term trend.
 
-**Sum of squares: 30,007**
-
-Files: primes.csv`
+| Metric | Value |
+|--------|-------|
+| Latest price | 492.5 |
+| 20-day MA | 520.95 |
+| 50-day MA | 519.58 |
+| Trend | Up |`
     }
   },
   {
@@ -365,15 +393,18 @@ Files: primes.csv`
     panel: {
       label: "GET /api/sessions/:id/events",
       lang: "text",
-      content: `run.started            chain: groq → gemini
+      content: `run.started            chain: groq → gemini → ollama
 llm.request            step 1
 assistant.message      codemode × 1
-execution.started      exec_2b91 · local-worker
-tool.call / result     sandbox.runPython  ok  612ms
-execution.log          python wrote 20 rows
-tool.call / result     sandbox.runShell   ok  184ms
-execution.completed    ok  1.1s
+execution.started      exec_5040 · local-worker
+tool.call / result     alphavantage.GLOBAL_QUOTE        ok  750ms
+tool.call / result     alphavantage.TIME_SERIES_DAILY   ok  542ms
+tool.call / result     fs.writeFile × 2                 ok  2ms
+tool.call / result     sandbox.installPackage           ok  18.9s
+tool.call / result     sandbox.runPython                ok  1.4s
+execution.completed    ok  22.7s
 llm.request            step 2
+provider.failover      groq → gemini → ollama
 assistant.message      final answer
 run.completed          2 steps`
     }
@@ -450,10 +481,12 @@ function SectionHead({ kicker, title, children }: { kicker: string; title: strin
 
 function Comparison() {
   const classic = [
-    ["LLM", "call sandbox.runPython"],
-    ["host", "→ stdout: 20"],
-    ["LLM", "read result, call sandbox.runShell"],
-    ["host", "→ stdout: 30007"],
+    ["LLM", "call alphavantage.GLOBAL_QUOTE"],
+    ["host", "→ quote JSON"],
+    ["LLM", "call alphavantage.TIME_SERIES_DAILY"],
+    ["host", "→ 100 daily bars (12 KB) into the context"],
+    ["LLM", "call sandbox.runPython, data pasted in"],
+    ["host", "→ MA20 520.95 · MA50 519.58"],
     ["LLM", "write the answer"]
   ];
   return (
@@ -466,7 +499,7 @@ function Comparison() {
         <div className="rounded-xl border border-line bg-surface/60 p-5">
           <div className="mb-4 flex items-center justify-between">
             <div className="text-sm font-medium">Classic tool calling</div>
-            <Badge variant="warn">3 LLM calls</Badge>
+            <Badge variant="warn">4 LLM calls</Badge>
           </div>
           <ol className="space-y-2">
             {classic.map(([who, what], i) => (
@@ -476,7 +509,7 @@ function Comparison() {
               </li>
             ))}
           </ol>
-          <p className="mt-4 text-xs leading-relaxed text-faint">Each arrow from the host is another prompt, another wait, more tokens.</p>
+          <p className="mt-4 text-xs leading-relaxed text-faint">Each arrow from the host is another prompt, another wait, more tokens. The price history alone would be pushed through the context window twice.</p>
         </div>
         <div className="rounded-xl border border-lime/25 bg-lime/[0.04] p-5">
           <div className="mb-4 flex items-center justify-between">
@@ -486,7 +519,7 @@ function Comparison() {
           <ol className="space-y-2">
             {[
               ["LLM", "codemode({ code })  ← whole plan"],
-              ["exec", "runPython → runShell → return"],
+              ["exec", "quote → prices → files → pandas → return"],
               ["LLM", "write the answer"]
             ].map(([who, what], i) => (
               <li key={i} className="flex items-center gap-3 font-mono text-xs">
@@ -750,7 +783,7 @@ function CodePanel({ panel }: { panel: Panel }) {
 /** Tiny highlighter for the demo snippets: keywords, strings, comments and tool namespaces. */
 function HighlightJs({ code }: { code: string }) {
   const parts: ReactNode[] = [];
-  const re = /(\/\/[^\n]*|\/\*\*[\s\S]*?\*\/)|(`[\s\S]*?`|"[^"\n]*"|'[^'\n]*')|\b(async|await|const|return|declare|Promise)\b|\b(sandbox|fs|web|codemode|everything)\b(?=[.:])/g;
+  const re = /(\/\/[^\n]*|\/\*\*[\s\S]*?\*\/)|(`[\s\S]*?`|"[^"\n]*"|'[^'\n]*')|\b(async|await|const|return|declare|Promise)\b|\b(sandbox|fs|web|codemode|alphavantage)\b(?=[.:])/g;
   let last = 0;
   let m: RegExpExecArray | null;
   let k = 0;
@@ -835,18 +868,19 @@ function Layers() {
 
 /* ---------- MCP servers ---------- */
 
-// Real payloads from @modelcontextprotocol/server-everything@2.0.0 (the server in mcp.json).
+// Real payloads from the Alpha Vantage MCP server (https://mcp.alphavantage.co/mcp, alphavantage-mcp-server 1.0.0), the server in mcp.json.
 const MCP_STEPS: { id: string; tab: string; title: string; body: ReactNode; panel: Panel }[] = [
   {
     id: "config",
     tab: "1 · Configure",
-    title: "Declare the server once",
+    title: "Declare the server, pick the tools",
     body: (
       <>
         <code>mcp.json</code> uses the familiar <code>mcpServers</code> shape: <code>command</code> + <code>args</code> + <code>env</code> for stdio,{" "}
         <code>url</code> + <code>headers</code> for Streamable HTTP. <code>{"${VAR}"}</code> placeholders are filled from <code>.env</code>, so the
-        file holds no secrets. At startup the agent connects in the background; a server that is down is retried and shown as failed, but never
-        blocks the agent.
+        file holds no secrets, and the UI shows the URL without its query string. Alpha Vantage offers 133 tools; the optional{" "}
+        <code>tools</code> allowlist exposes just 8, which keeps the model's context small and the demo focused. A server that is down is retried and
+        shown as failed, but never blocks the agent.
       </>
     ),
     panel: {
@@ -854,16 +888,19 @@ const MCP_STEPS: { id: string; tab: string; title: string; body: ReactNode; pane
       lang: "json",
       content: `{
   "mcpServers": {
-    "everything": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-everything@2.0.0"],
-      "description": "Reference MCP server with demo tools (echo, get-sum, structured content, errors). No API key needed."
+    "alphavantage": {
+      "url": "https://mcp.alphavantage.co/mcp?apikey=\${ALPHAVANTAGE_API_KEY}",
+      "description": "Alpha Vantage market data: quotes, daily prices, ... Pass datatype: \\"json\\" ... Free key: 1 request per second and 25 per day ...",
+      "tools": [
+        "SYMBOL_SEARCH", "GLOBAL_QUOTE", "TIME_SERIES_DAILY", "COMPANY_OVERVIEW",
+        "EARNINGS", "NEWS_SENTIMENT", "TOP_GAINERS_LOSERS", "RSI"
+      ]
     }
   }
 }
 
 // agent log
-  MCP everything (stdio: npx -y @modelcontextprotocol/server-everything@2.0.0) → 16 tools as \`everything.*\``
+  MCP alphavantage (https://mcp.alphavantage.co/mcp) → 8 tools as \`alphavantage.*\``
     }
   },
   {
@@ -873,41 +910,30 @@ const MCP_STEPS: { id: string; tab: string; title: string; body: ReactNode; pane
     body: (
       <>
         The MCP client (the official <code>@modelcontextprotocol/sdk</code>) runs <code>tools/list</code>. Each tool brings an{" "}
-        <code>inputSchema</code> and, when the server declares one, an <code>outputSchema</code>. Note the hyphenated name: it is not a valid
-        JavaScript identifier.
+        <code>inputSchema</code> and, when the server declares one, an <code>outputSchema</code>. Alpha Vantage's output schema is just{" "}
+        <code>{"{ type: object }"}</code>, so the program gets an untyped object back. Tools outside the allowlist are dropped here and never reach
+        the program or the prompt.
       </>
     ),
     panel: {
-      label: "tools/list → tools[] (excerpt: 1 of 16)",
+      label: "tools/list → tools[] (excerpt: 1 of 133, 8 kept)",
       lang: "json",
       content: `{
-  "name": "get-structured-content",
-  "title": "Get Structured Content Tool",
-  "description": "Returns structured content along with an output schema for client data validation",
+  "name": "GLOBAL_QUOTE",
+  "description": "Returns the latest price and volume information for a ticker.",
   "inputSchema": {
     "type": "object",
     "properties": {
-      "location": {
-        "type": "string",
-        "enum": ["New York", "Chicago", "Los Angeles"],
-        "description": "Choose city"
-      }
+      "symbol": { "type": "string", "description": "The symbol of the global ticker. For example: symbol=IBM" },
+      "datatype": { "type": "string", "description": "By default, datatype=csv. Strings json and csv are accepted ..." },
+      "entitlement": { "type": "string", "description": "\\"delayed\\" for 15-minute delayed data, \\"realtime\\" for realtime data" },
+      "return_full_data": { "type": "boolean" }
     },
-    "required": ["location"],
-    "$schema": "https://json-schema.org/draft/2020-12/schema"
-  },
-  "outputSchema": {
-    "type": "object",
-    "properties": {
-      "temperature": { "type": "number", "description": "Temperature in celsius" },
-      "conditions": { "type": "string", "description": "Weather conditions description" },
-      "humidity": { "type": "number", "description": "Humidity percentage" }
-    },
-    "required": ["temperature", "conditions", "humidity"],
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "required": ["symbol"],
     "additionalProperties": false
   },
-  "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
+  "outputSchema": { "type": "object", "additionalProperties": true },
+  "annotations": { "title": "Global Quote", "readOnlyHint": true, "destructiveHint": false, "openWorldHint": false }
 }`
     }
   },
@@ -917,55 +943,38 @@ const MCP_STEPS: { id: string; tab: string; title: string; body: ReactNode; pane
     title: "Each server becomes a typed namespace",
     body: (
       <>
-        <code>McpConnector</code> from <code>@cloudflare/codemode</code> sanitizes names (<code>get-structured-content</code> →{" "}
-        <code>get_structured_content</code>, the real name is kept for the call), and the same <code>generateTypesFromJsonSchema</code> pipeline as
-        the built-in tools writes the declaration. Tools without an output schema return <code>McpToolResult</code>. This block is added to the{" "}
+        <code>McpConnector</code> from <code>@cloudflare/codemode</code> maps each tool to a method, and the same{" "}
+        <code>generateTypesFromJsonSchema</code> pipeline as the built-in tools writes the declaration. The server's own tool descriptions and the
+        notes in <code>mcp.json</code> (use <code>datatype: "json"</code>, mind the rate limit) travel with it. This block is added to the{" "}
         <code>codemode</code> tool description; the model still sees one tool.
       </>
     ),
     panel: {
-      label: "namespaceTypes(everything)  (excerpt: 2 of 16 tools)",
+      label: "namespaceTypes(alphavantage)  (excerpt: 1 of 8 tools)",
       lang: "js",
-      content: `/** Tools from the MCP server "everything" (mcp-servers/everything 2.0.0). Reference MCP server with demo tools (echo, get-sum, structured content, errors). No API key needed. Tools typed McpToolResult have no MCP output schema. A tool error is thrown. */
-/** Result of an MCP tool that declares no output schema: its text output (JSON-parsed when the text is JSON), or the raw MCP result when it contains images, audio or resources. */
-type McpToolResult = string | number | boolean | null | unknown[] | { [key: string]: unknown } | { content: McpContent[] };
-type McpContent =
-    | { type: "text"; text: string }
-    | { type: "image" | "audio"; data: string; mimeType: string }
-    | { type: "resource" | "resource_link"; [key: string]: unknown };
-type GetStructuredContentInput = {
-    /** Choose city */
-    location: "New York" | "Chicago" | "Los Angeles";
+      content: `/** Tools from the MCP server "alphavantage" (alphavantage-mcp-server 1.0.0). Alpha Vantage market data: ... Pass datatype: "json" for parsed JSON (the default is CSV text). Free key: 1 request per second and 25 per day, so call tools one at a time with a short pause, never in parallel. ... Errors come back as data, not exceptions, e.g. { error: { type: "rate_limit", message } }: check for an "error" key before using a result. */
+type GLOBAL_QUOTEInput = {
+    /** The symbol of the global ticker. For example: symbol=IBM */
+    symbol: string;
+    /** By default, datatype=csv. Strings json and csv are accepted with the following specifications: */
+    datatype?: string;
+    /** "delayed" for 15-minute delayed data, "realtime" for realtime data */
+    entitlement?: string;
+    /** Parameter return_full_data */
+    return_full_data?: boolean;
 }
-type GetStructuredContentOutput = {
-    /** Temperature in celsius */
-    temperature: number;
-    /** Weather conditions description */
-    conditions: string;
-    /** Humidity percentage */
-    humidity: number;
+type GLOBAL_QUOTEOutput = {
+    [key: string]: unknown;
 }
-type GetSumInput = {
-    /** First number */
-    a: number;
-    /** Second number */
-    b: number;
-}
-type GetSumOutput = McpToolResult
 
-declare const everything: {
+declare const alphavantage: {
 	/**
-	 * Returns structured content along with an output schema for client data validation
-	 * @param input.location - Choose city
+	 * Returns the latest price and volume information for a ticker.
+	 * @param input.symbol - The symbol of the global ticker. For example: symbol=IBM
+	 * @param input.datatype - By default, datatype=csv. ...
 	 */
-	get_structured_content: (input: GetStructuredContentInput) => Promise<GetStructuredContentOutput>;
-
-	/**
-	 * Returns the sum of two numbers
-	 * @param input.a - First number
-	 * @param input.b - Second number
-	 */
-	get_sum: (input: GetSumInput) => Promise<GetSumOutput>;
+	GLOBAL_QUOTE: (input: GLOBAL_QUOTEInput) => Promise<GLOBAL_QUOTEOutput>;
+	// ... TIME_SERIES_DAILY, SYMBOL_SEARCH, NEWS_SENTIMENT, TOP_GAINERS_LOSERS, COMPANY_OVERVIEW, EARNINGS, RSI
 }`
     }
   },
@@ -975,42 +984,43 @@ declare const everything: {
     title: "The program calls it like any other API",
     body: (
       <>
-        Inside the executor <code>everything.get_sum</code> is a stub. The call crosses the boundary as JSON, the host maps it back to the MCP name and
-        runs <code>tools/call</code>. Results are unwrapped: <code>structuredContent</code> as is, text as a string (JSON-parsed when it is JSON);{" "}
-        <code>isError</code> becomes a thrown error. The program never holds the client, its transport or any credential.
+        Inside the executor <code>alphavantage.GLOBAL_QUOTE</code> is a stub. The call crosses the boundary as JSON, the host runs{" "}
+        <code>tools/call</code> and unwraps the result: <code>structuredContent</code> as is, text as a string (JSON-parsed when it is JSON);{" "}
+        <code>isError</code> becomes a thrown error. The program never holds the client, its transport or the API key. Note the default is CSV text:
+        asking for <code>datatype: "json"</code> returns an object the program can use directly. Also note that Alpha Vantage reports limits as
+        plain data, not as an error, which is why the prompt tells the model to check for an <code>error</code> key.
       </>
     ),
     panel: {
       label: "program → runtime → host → MCP server",
       lang: "js",
       content: `async () => {
-  const [sum, weather] = await Promise.all([
-    everything.get_sum({ a: 1234, b: 5678 }),
-    everything.get_structured_content({ location: "Chicago" })
-  ]);
-  return { sum, weather };
+  const quote = await alphavantage.GLOBAL_QUOTE({ symbol: "MSFT", datatype: "json" });
+  return quote["Global Quote"]["05. price"];
 }
 
 // runtime → host
-{ "type": "tool-call", "id": "1", "namespace": "everything", "name": "get_sum", "args": "{\\"a\\":1234,\\"b\\":5678}" }
+{ "type": "tool-call", "id": "exec_5040…:1", "namespace": "alphavantage", "name": "GLOBAL_QUOTE",
+  "args": "{\\"symbol\\":\\"MSFT\\",\\"datatype\\":\\"json\\"}" }
 
-// host → MCP server: JSON-RPC tools/call params, with the real MCP name
-{ "method": "tools/call", "params": { "name": "get-sum", "arguments": { "a": 1234, "b": 5678 } } }
+// host → MCP server: JSON-RPC tools/call params
+{ "method": "tools/call", "params": { "name": "GLOBAL_QUOTE", "arguments": { "symbol": "MSFT", "datatype": "json" } } }
 
-// MCP results
-{ "content": [{ "type": "text", "text": "The sum of 1234 and 5678 is 6912." }] }
-{ "content": [{ "type": "text", "text": "{\\"temperature\\":36,\\"conditions\\":\\"Light rain / drizzle\\",\\"humidity\\":82}" }],
-  "structuredContent": { "temperature": 36, "conditions": "Light rain / drizzle", "humidity": 82 } }
+// MCP result
+{ "content": [{ "type": "text", "text": "{ \"Global Quote\": { \"01. symbol\": \"MSFT\", ... } }" }],
+  "structuredContent": { "Global Quote": { "01. symbol": "MSFT", "05. price": "492.5000", "07. latest trading day": "2026-11-23", ... } } }
 
-// program return value
-{ "sum": "The sum of 1234 and 5678 is 6912.",
-  "weather": { "temperature": 36, "conditions": "Light rain / drizzle", "humidity": 82 } }`
+// without datatype: "json" the default is CSV text
+{ "structuredContent": { "result": "symbol,open,high,low,price,volume,latestDay,previousClose,change,changePercent\\r\\nNVDA,167.0350,..." } }
+
+// when the free limit is hit, it is data, not an exception
+{ "error": { "type": "rate_limit", "message": "... spreading out your free API requests more sparingly (1 request per second) ...", "detail": "Alpha Vantage rate limit reached. Wait and retry, ..." } }`
     }
   }
 ];
 
 const MCP_PROMPT =
-  "Using the everything MCP server in one program: add 1234 and 5678 with its sum tool and get the structured weather for Chicago.";
+  "Search Alpha Vantage for the symbol of Nvidia, then get its latest quote and the top 3 news-sentiment items for it, one call at a time, and write a short brief to brief.md.";
 
 function McpSection({ onTry }: { onTry: (p: string) => void }) {
   const [i, setI] = useState(0);
@@ -1018,7 +1028,7 @@ function McpSection({ onTry }: { onTry: (p: string) => void }) {
   return (
     <section id="mcp" className="scroll-mt-6 py-14">
       <SectionHead kicker="04 · MCP servers" title="Any MCP server becomes a typed API">
-        Following Cloudflare's Code Mode design, AgentOS does not hand MCP tools to the model as separate tools. It connects to each server, turns its
+        Following Cloudflare's Code Mode design, AgentOS does not hand MCP tools to the model as separate tools. Here the server is Alpha Vantage's market-data API. It connects to each server, turns its
         tools into TypeScript, and lets the program call them. The model still sees only <code className="text-paper">codemode</code>.
       </SectionHead>
       <div className="rounded-2xl border border-line bg-obsidian-950/80 p-3 sm:p-4">
@@ -1080,7 +1090,8 @@ function Guarantees() {
     ["Untrusted code stays boxed", "The program sees only typed stubs. Sandbox containers have no network, a read-only root, no capabilities and resource limits."],
     ["The web tool can't reach your network", "Private, loopback, link-local and metadata addresses are blocked, including after redirects."],
     ["Nothing is lost on reload", "Every event is persisted in SQLite and replayed over SSE with Last-Event-ID."],
-    ["MCP credentials stay on the host", "Server tokens and env live in the agent process. Programs get typed stubs; a stdio server gets only a minimal environment plus its own env."]
+    ["The API key stays on the host", "The Alpha Vantage key lives only in the agent process (in the MCP URL it holds). Programs get typed stubs, and the sandbox that runs Python has no network at all, so it can never send data or the key anywhere."],
+    ["Only the tools you pick are reachable", "The tools allowlist in mcp.json decides which of Alpha Vantage's 133 tools exist for programs. The rest are not in the types, the prompt or the namespace."]
   ];
   return (
     <section className="py-14">

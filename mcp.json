@@ -1,9 +1,18 @@
 {
   "mcpServers": {
-    "everything": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-everything@2.0.0"],
-      "description": "Reference MCP server with demo tools (echo, get-sum, structured content, errors). No API key needed."
+    "alphavantage": {
+      "url": "https://mcp.alphavantage.co/mcp?apikey=${ALPHAVANTAGE_API_KEY}",
+      "description": "Alpha Vantage market data: quotes, daily prices, company fundamentals, news sentiment, movers and indicators. Pass datatype: \"json\" for parsed JSON (the default is CSV text). Free key: 1 request per second and 25 per day, so call tools one at a time with a short pause, never in parallel. Never pass entitlement (free keys have no realtime or delayed access). Errors come back as data, not exceptions, e.g. { error: { type: \"rate_limit\", message } }: check for an \"error\" key before using a result.",
+      "tools": [
+        "SYMBOL_SEARCH",
+        "GLOBAL_QUOTE",
+        "TIME_SERIES_DAILY",
+        "COMPANY_OVERVIEW",
+        "EARNINGS",
+        "NEWS_SENTIMENT",
+        "TOP_GAINERS_LOSERS",
+        "RSI"
+      ]
     }
   }
 }

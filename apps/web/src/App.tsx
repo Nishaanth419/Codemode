@@ -14,24 +14,24 @@ import type { Execution, Session, ToolNamespace } from "./lib/types";
 
 const EXAMPLES = [
   {
-    icon: Braces,
-    title: "Compute & export",
-    prompt: "Generate the first 20 prime numbers with Python, save them with their squares to primes.csv, then use a shell one-liner to report the sum of the squares."
+    icon: Globe,
+    title: "Market brief",
+    prompt: "Look up the latest quote for NVDA and AAPL, pull the top 3 news-sentiment items for each, and write a short market brief to brief.md."
   },
   {
     icon: FileBarChart,
-    title: "Data analysis",
-    prompt: "Install numpy and matplotlib, simulate 10,000 rolls of two dice, plot the distribution of sums to dice.png, and tell me the most common sum."
+    title: "Price analysis",
+    prompt: "Get MSFT's last 100 daily closes, compute 20- and 50-day moving averages and daily volatility with pandas, plot them to msft.png, and say whether the trend is up or down."
   },
   {
-    icon: Globe,
-    title: "Fetch from the web",
-    prompt: "Fetch the top 5 Hacker News stories from the official HN Firebase API and write a short markdown digest to hn.md."
+    icon: Braces,
+    title: "Movers deep-dive",
+    prompt: "Get today's top gainers and losers, save them to movers.csv, then for the biggest gainer fetch its company overview and RSI and say whether it looks overbought."
   },
   {
     icon: Wrench,
-    title: "Inspect the sandbox",
-    prompt: "List the tools you can use, then report the Python, Node.js and bash versions inside the sandbox in one program."
+    title: "Inspect the tools",
+    prompt: "List the Alpha Vantage tools you can call and what each one does, then report the Python version inside the sandbox, in one program."
   }
 ];
 
